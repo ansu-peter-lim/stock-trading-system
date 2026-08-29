@@ -1,0 +1,13 @@
+telegram_message_id,rank,action,corrected_report_date,corrected_stock_name,corrected_return_pct,reason,note
+17910,,correct_report_date,2024-02-16,,,author date typo confirmed manually,
+21278,,exclude_report,,,,exact duplicate of 21284,
+26080,,correct_report_date,2025-10-28,,,author date typo confirmed manually,
+26207,,correct_report_date,2025-11-04,,,author date typo confirmed manually,
+26652,,exclude_report,,,,exact duplicate of 26650,
+27220,,correct_report_date,2026-01-07,,,author date typo confirmed manually,
+27277,,correct_report_date,2026-01-09,,,author date typo confirmed manually,
+29140,,correct_report_date,2026-05-13,,,author date typo confirmed manually,
+29182,,correct_report_date,2026-05-15,,,author date typo confirmed manually,
+29818,,correct_report_date,2026-06-24,,,author date typo confirmed manually,
+29960,,correct_report_date,2026-07-06,,,author date typo confirmed manually,
+30690,,correct_report_date,2026-08-26,,,author date typo confirmed manually,
