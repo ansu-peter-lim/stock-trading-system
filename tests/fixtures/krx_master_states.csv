@@ -1,0 +1,11 @@
+stock_code,market,stock_name,effective_date,listing_date,delisting_date_raw,delisting_date_meaning,security_type_raw,source_name,source_role,service_name,source_as_of,raw_file_path
+005930,KOSPI,삼성전자,2023-09-01,1975-06-11,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states.csv
+012345,KOSDAQ,옛이름,2023-09-01,2020-01-02,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states.csv
+012345,KOSDAQ,새이름,2024-04-19,2020-01-02,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,변경상장,2026-08-30,tests/fixtures/krx_master_states.csv
+001230,KOSDAQ,폐지대상,2023-09-01,2021-03-02,2024-01-10,EFFECTIVE_DATE,보통주,KRX,PRIMARY_KRX,상장폐지종목현황,2026-08-30,tests/fixtures/krx_master_states.csv
+333333,KOSPI,이전상장,2023-09-01,2019-01-02,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states.csv
+333333,KOSDAQ,이전상장,2025-01-03,2019-01-02,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,이전상장,2026-08-30,tests/fixtures/krx_master_states.csv
+000001,KOSPI,테스트우,2023-09-01,2020-01-02,,UNCONFIRMED,우선주,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states.csv
+000002,KOSDAQ,테스트스팩,2023-09-01,2022-01-03,,UNCONFIRMED,기업인수목적회사,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states.csv
+111111,KOSPI,ABC,2023-09-01,2020-01-02,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states.csv
+222222,KOSDAQ,ＡＢＣ,2023-09-01,2020-01-02,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states.csv

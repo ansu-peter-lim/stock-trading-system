@@ -1,0 +1,2 @@
+stock_code,market,stock_name,effective_date,listing_date,delisting_date_raw,delisting_date_meaning,security_type_raw,source_name,source_role,service_name,source_as_of,raw_file_path
+000099,KOSDAQ,잘못된구간,2023-01-01,2023-02-01,,UNCONFIRMED,보통주,KRX,PRIMARY_KRX,종목기본정보,2026-08-30,tests/fixtures/krx_master_states_invalid.csv

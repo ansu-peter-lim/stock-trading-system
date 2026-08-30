@@ -1,0 +1,10 @@
+stock_code,market,stock_name,stock_name_normalized,valid_from,valid_to,listing_date,delisting_date,security_type,security_type_raw,source,source_as_of
+005930,KOSPI,삼성전자,삼성전자,2000-01-01,,1975-06-11,,COMMON,보통주,mock_krx,2026-08-30
+141080,KOSDAQ,레고켐바이오,레고켐바이오,2023-01-01,2024-04-18,2013-05-10,,COMMON,보통주,mock_krx,2026-08-30
+141080,KOSDAQ,리가켐바이오,리가켐바이오,2024-04-19,,2013-05-10,,COMMON,보통주,mock_krx,2026-08-30
+012345,KOSDAQ,형지I&C,형지I&C,2023-01-01,,2004-07-02,,COMMON,보통주,mock_krx,2026-08-30
+111111,KOSPI,ABC,ABC,2023-01-01,,2020-01-01,,COMMON,보통주,mock_krx,2026-08-30
+222222,KOSDAQ,ＡＢＣ,ABC,2023-01-01,,2020-01-01,,COMMON,보통주,mock_krx,2026-08-30
+033333,KOSDAQ,미래상장,미래상장,2025-01-01,,2025-01-01,,COMMON,보통주,mock_krx,2026-08-30
+099999,KOSDAQ,폐지회사,폐지회사,2023-01-01,2024-01-09,2023-01-01,2024-01-10,COMMON,보통주,mock_krx,2026-08-30
+044444,KOSDAQ,검토스팩,검토스팩,2023-01-01,,2023-01-01,,SPAC,기업인수목적회사,mock_krx,2026-08-30
