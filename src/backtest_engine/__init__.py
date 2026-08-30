@@ -1,5 +1,32 @@
-"""Reusable market-data foundation for the Strategy V1 backtest engine."""
+"""Reusable foundations for the Strategy V1 backtest engine."""
 
+from .event_runner import (
+    DeterministicEventRunner,
+    EventRunnerError,
+    EventRunResult,
+    EventTraceEntry,
+    EventType,
+)
+from .events import (
+    CANONICAL_TIMEZONE_ID,
+    BarIdentity,
+    DeterministicTieBreak,
+    EntityKindRank,
+    EventKey,
+    EventModelError,
+    EventPhase,
+    assign_bar_identities,
+)
+from .execution import (
+    ExecutionModelError,
+    IntentSubmission,
+    IntentType,
+    NextBarScheduler,
+    OrderSide,
+    ScheduleResult,
+    ScheduleStatus,
+    StrategyIntent,
+)
 from .indicators import (
     DailyIndicatorPoint,
     DailyPivotCandidate,
@@ -10,6 +37,17 @@ from .indicators import (
     detect_daily_pivots,
     intraday_indicators_as_of,
     pivots_as_of,
+)
+from .ledgers import (
+    FillLedger,
+    FillLedgerEntry,
+    LedgerValidationError,
+    OrderLedger,
+    OrderLedgerEntry,
+    OrderStatus,
+    SignalLedger,
+    SignalLedgerEntry,
+    SignalStatus,
 )
 from .models import (
     DailyBar,
@@ -26,18 +64,48 @@ from .validation import (
 )
 
 __all__ = [
+    "CANONICAL_TIMEZONE_ID",
+    "BarIdentity",
     "DailyBar",
     "DailyIndicatorPoint",
     "DailyPivotCandidate",
+    "DeterministicEventRunner",
+    "DeterministicTieBreak",
+    "EntityKindRank",
+    "EventKey",
+    "EventModelError",
+    "EventPhase",
+    "EventRunResult",
+    "EventRunnerError",
+    "EventTraceEntry",
+    "EventType",
+    "ExecutionModelError",
     "ExplicitTradingCalendar",
+    "FillLedger",
+    "FillLedgerEntry",
     "FiveMinuteBar",
+    "IntentSubmission",
+    "IntentType",
     "IntradayIndicatorPoint",
+    "LedgerValidationError",
     "MarketDataValidationError",
+    "NextBarScheduler",
     "Ohlcv",
+    "OrderLedger",
+    "OrderLedgerEntry",
+    "OrderSide",
+    "OrderStatus",
     "PivotKind",
+    "ScheduleResult",
+    "ScheduleStatus",
+    "SignalLedger",
+    "SignalLedgerEntry",
+    "SignalStatus",
+    "StrategyIntent",
     "TimestampSemantics",
     "TradingCalendar",
     "TradingSession",
+    "assign_bar_identities",
     "calculate_daily_indicators",
     "calculate_intraday_indicators",
     "detect_daily_pivots",
