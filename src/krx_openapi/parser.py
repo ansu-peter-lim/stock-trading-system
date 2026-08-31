@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from types import MappingProxyType
 
 from .services import KrxServiceDefinition
@@ -15,12 +16,24 @@ class KrxSchemaError(ValueError):
     """A KRX response does not satisfy the selected service contract."""
 
 
+class ParValueKind(str, Enum):
+    NUMERIC = "NUMERIC"
+    NO_PAR_VALUE = "NO_PAR_VALUE"
+
+
+@dataclass(frozen=True, slots=True)
+class ParValue:
+    kind: ParValueKind
+    value: Decimal | None
+
+
 @dataclass(frozen=True, slots=True)
 class KrxParsedRow:
     stock_code: str
     raw_fields: Mapping[str, str]
     decimal_fields: Mapping[str, Decimal]
     integer_fields: Mapping[str, int]
+    par_value: ParValue | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,13 +95,24 @@ def parse_krx_response(
             field: _text(source[field], field)
             for field in service.required_response_fields
         }
-        stock_code = raw[service.stock_code_field].strip()
-        if len(stock_code) != 6 or not stock_code.isascii() or not stock_code.isdigit():
-            raise KrxSchemaError("KRX stock code must be six ASCII digits")
+        stock_code = raw[service.stock_code_field]
+        if len(stock_code) != 6 or not stock_code.isascii() or not stock_code.isalnum():
+            raise KrxSchemaError(
+                "KRX source stock code must be six ASCII alphanumeric characters"
+            )
         decimals: dict[str, Decimal] = {}
         integers: dict[str, int] = {}
+        par_value: ParValue | None = None
         try:
             for field in service.decimal_fields:
+                if field == "PARVAL":
+                    if raw[field] == "무액면":
+                        par_value = ParValue(ParValueKind.NO_PAR_VALUE, None)
+                    else:
+                        value = Decimal(_numeric_text(raw[field], field))
+                        par_value = ParValue(ParValueKind.NUMERIC, value)
+                        decimals[field] = value
+                    continue
                 decimals[field] = Decimal(_numeric_text(raw[field], field))
             for field in service.integer_fields:
                 normalized = _numeric_text(raw[field], field)
@@ -105,6 +129,7 @@ def parse_krx_response(
                 MappingProxyType(raw),
                 MappingProxyType(decimals),
                 MappingProxyType(integers),
+                par_value,
             )
         )
     return KrxParsedResponse(tuple(parsed_rows))

@@ -10,7 +10,11 @@ from typing import Self
 from urllib.error import URLError
 
 from src.krx_openapi.collector import collect_one
-from src.krx_openapi.parser import KrxSchemaError, parse_krx_response
+from src.krx_openapi.parser import (
+    KrxSchemaError,
+    ParValueKind,
+    parse_krx_response,
+)
 from src.krx_openapi.services import KRX_SERVICES
 from src.krx_openapi.smoke import require_network_access
 from src.krx_openapi.store import (
@@ -176,6 +180,68 @@ class KrxParserTests(unittest.TestCase):
         self.assertEqual(Decimal(70500), daily.decimal_fields["TDD_CLSPRC"])
         self.assertEqual(12345678, daily.integer_fields["ACC_TRDVOL"])
         self.assertEqual("70,500", daily.raw_fields["TDD_CLSPRC"])
+
+    def test_source_stock_code_contract(self) -> None:
+        service = KRX_SERVICES["stk_isu_base_info"]
+        for code in ("123456", "005930", "12345A", "1234AB"):
+            with self.subTest(code=code):
+                parsed = parse_krx_response(
+                    body([basic_row() | {"ISU_SRT_CD": code}]), service
+                ).rows[0]
+                self.assertEqual(code, parsed.stock_code)
+
+        for code in ("12345", "1234567", "12345-"):
+            with (
+                self.subTest(code=code),
+                self.assertRaises(KrxSchemaError),
+            ):
+                parse_krx_response(body([basic_row() | {"ISU_SRT_CD": code}]), service)
+
+        with self.assertRaises(KrxSchemaError):
+            parse_krx_response(body([basic_row() | {"ISU_SRT_CD": 5930}]), service)
+
+    def test_par_value_typed_contract(self) -> None:
+        service = KRX_SERVICES["stk_isu_base_info"]
+        for source, expected in (
+            ("5000", Decimal(5000)),
+            (".5", Decimal("0.5")),
+            (".25", Decimal("0.25")),
+        ):
+            with self.subTest(source=source):
+                parsed = parse_krx_response(
+                    body([basic_row() | {"PARVAL": source}]), service
+                ).rows[0]
+                self.assertEqual(ParValueKind.NUMERIC, parsed.par_value.kind)
+                self.assertEqual(expected, parsed.par_value.value)
+                self.assertEqual(expected, parsed.decimal_fields["PARVAL"])
+                self.assertEqual(source, parsed.raw_fields["PARVAL"])
+
+        no_par = parse_krx_response(
+            body([basic_row() | {"PARVAL": "무액면"}]), service
+        ).rows[0]
+        self.assertEqual(ParValueKind.NO_PAR_VALUE, no_par.par_value.kind)
+        self.assertIsNone(no_par.par_value.value)
+        self.assertNotIn("PARVAL", no_par.decimal_fields)
+        self.assertEqual("무액면", no_par.raw_fields["PARVAL"])
+
+        with self.assertRaises(KrxSchemaError):
+            parse_krx_response(body([basic_row() | {"PARVAL": "unknown"}]), service)
+
+    def test_zero_daily_values_are_valid_and_raw_text_is_preserved(self) -> None:
+        source = daily_row() | {
+            "TDD_CLSPRC": "0",
+            "TDD_OPNPRC": "0",
+            "TDD_HGPRC": "0",
+            "TDD_LWPRC": "0",
+            "ACC_TRDVOL": "0",
+        }
+        parsed = parse_krx_response(body([source]), KRX_SERVICES["stk_bydd_trd"]).rows[
+            0
+        ]
+        self.assertEqual(Decimal(0), parsed.decimal_fields["TDD_OPNPRC"])
+        self.assertEqual(0, parsed.integer_fields["ACC_TRDVOL"])
+        self.assertEqual("0", parsed.raw_fields["TDD_OPNPRC"])
+        self.assertEqual("0", parsed.raw_fields["ACC_TRDVOL"])
 
     def test_empty_response_is_valid_and_distinct(self) -> None:
         parsed = parse_krx_response(body([]), KRX_SERVICES["stk_isu_base_info"])
