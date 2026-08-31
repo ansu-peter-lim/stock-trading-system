@@ -248,7 +248,9 @@ def validate_provenance(
         if path.exists():
             actual = hashlib.sha256(path.read_bytes()).hexdigest()
             if actual != record.raw_file_sha256:
-                raise ValidationError(f"raw provenance SHA-256 mismatch: {raw_path}")
+                raise ValidationError(
+                    f"raw provenance SHA-256 mismatch: {record.raw_file_path}"
+                )
         if record.row_count < 0:
             raise ValidationError("provenance row_count must not be negative")
 

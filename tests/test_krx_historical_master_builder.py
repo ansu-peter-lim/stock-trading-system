@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from src.stock_mapping.historical_master import ValidationError
@@ -86,6 +88,11 @@ class KrxHistoricalMasterBuilderTests(unittest.TestCase):
             retrieved_at="2026-08-30T00:00:00Z", request_parameters={"basDd": "20260828"},
             row_count=10,
         )
+        self.assertEqual(FIXTURE.as_posix(), provenance.raw_file_path)
+        self.assertEqual(
+            hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
+            provenance.raw_file_sha256,
+        )
         self.assertEqual(64, len(provenance.raw_file_sha256))
         self.assertNotIn("AUTH", provenance.request_parameters.upper())
         validate_provenance(load_source_states(FIXTURE), [provenance])
@@ -94,6 +101,23 @@ class KrxHistoricalMasterBuilderTests(unittest.TestCase):
                 FIXTURE, source_name="KRX", service_name="mock", requested_base_date="",
                 retrieved_at="", request_parameters={"AUTH_KEY": "secret"}, row_count=10,
             )
+
+    def test_provenance_hash_mismatch_blocks_output_with_source_path(self):
+        provenance = provenance_for_file(
+            FIXTURE, source_name="KRX", service_name="mock", requested_base_date="2026-08-28",
+            retrieved_at="2026-08-30T00:00:00Z", request_parameters={"basDd": "20260828"},
+            row_count=10,
+        )
+        invalid = replace(provenance, raw_file_sha256="0" * 64)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "master.csv"
+            with self.assertRaisesRegex(
+                ValidationError,
+                r"raw provenance SHA-256 mismatch: .*krx_master_states\.csv",
+            ):
+                validate_provenance(load_source_states(FIXTURE), [invalid])
+                write_master(output, self.result)
+            self.assertFalse(output.exists())
 
     def test_missing_provenance_is_error(self):
         with self.assertRaisesRegex(ValidationError, "missing provenance"):
