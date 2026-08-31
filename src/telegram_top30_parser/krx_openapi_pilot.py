@@ -10,25 +10,21 @@ import argparse
 import csv
 import hashlib
 import json
-import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from src.krx_openapi.parser import KrxSchemaError, parse_response_root
+from src.krx_openapi.services import KRX_SERVICES
+from src.krx_openapi.transport import EnvironmentAuthKeyProvider
 from src.stock_mapping.normalization import normalize_stock_name
 
-try:
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - a clear error is raised by load_auth_key
-    load_dotenv = None
-
-
 ENDPOINTS = {
-    "KOSPI": "https://data-dbg.krx.co.kr/svc/apis/sto/stk_isu_base_info",
-    "KOSDAQ": "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_isu_base_info",
+    "KOSPI": KRX_SERVICES["stk_isu_base_info"].endpoint,
+    "KOSDAQ": KRX_SERVICES["ksq_isu_base_info"].endpoint,
 }
 
 # Eight dates only: period anchors plus known delisting/name-change boundaries.
@@ -44,9 +40,16 @@ PILOT_DATES = (
 )
 
 MANIFEST_FIELDS = (
-    "source_name", "service_name", "market", "requested_base_date",
-    "retrieved_at", "request_parameters", "raw_file_path",
-    "raw_file_sha256", "row_count", "http_status",
+    "source_name",
+    "service_name",
+    "market",
+    "requested_base_date",
+    "retrieved_at",
+    "request_parameters",
+    "raw_file_path",
+    "raw_file_sha256",
+    "row_count",
+    "http_status",
 )
 
 
@@ -59,13 +62,7 @@ class FetchResult:
 
 def load_auth_key(env_path: Path = Path(".env")) -> str:
     """Load the secret without printing or returning it in diagnostics."""
-    if load_dotenv is None:
-        raise RuntimeError("python-dotenv is required: python -m pip install python-dotenv")
-    load_dotenv(env_path, override=False)
-    key = os.environ.get("KRX_AUTH_KEY", "").strip()
-    if not key:
-        raise RuntimeError("KRX_AUTH_KEY is not configured in the environment or .env")
-    return key
+    return EnvironmentAuthKeyProvider(env_path=env_path).get_auth_key()
 
 
 def fetch_snapshot(endpoint: str, base_date: str, auth_key: str) -> FetchResult:
@@ -74,7 +71,8 @@ def fetch_snapshot(endpoint: str, base_date: str, auth_key: str) -> FetchResult:
     try:
         with urlopen(request, timeout=30) as response:
             return FetchResult(
-                response.read(), response.status,
+                response.read(),
+                response.status,
                 datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             )
     except HTTPError as exc:
@@ -83,13 +81,10 @@ def fetch_snapshot(endpoint: str, base_date: str, auth_key: str) -> FetchResult:
 
 
 def response_rows(body: bytes) -> list[dict[str, object]]:
-    payload = json.loads(body.decode("utf-8-sig"))
-    rows = payload.get("OutBlock_1")
-    if not isinstance(rows, list):
-        raise ValueError("KRX response does not contain a list-valued OutBlock_1")
-    if not all(isinstance(row, dict) for row in rows):
-        raise ValueError("KRX OutBlock_1 contains a non-object row")
-    return rows
+    try:
+        return parse_response_root(body, "OutBlock_1")
+    except KrxSchemaError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def normalized_search_name(value: str) -> str:
@@ -108,7 +103,7 @@ def collect_pilot(
     manifest_path = manifest_path or root / "manifest.csv"
     records: list[dict[str, object]] = []
     for base_date in dates:
-        datetime.strptime(base_date, "%Y-%m-%d")
+        date.fromisoformat(base_date)
         for market, endpoint in ENDPOINTS.items():
             result = fetcher(endpoint, base_date, auth_key)
             rows = response_rows(result.body)  # validate before persisting
@@ -116,19 +111,24 @@ def collect_pilot(
             raw_path = root / relative
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_bytes(result.body)
-            records.append({
-                "source_name": "KRX Open API",
-                "service_name": f"{market} issue basic information",
-                "market": market,
-                "requested_base_date": base_date,
-                "retrieved_at": result.retrieved_at,
-                "request_parameters": json.dumps({"basDd": base_date.replace('-', '')},
-                                                  ensure_ascii=False, sort_keys=True),
-                "raw_file_path": raw_path.as_posix(),
-                "raw_file_sha256": hashlib.sha256(result.body).hexdigest(),
-                "row_count": len(rows),
-                "http_status": result.http_status,
-            })
+            records.append(
+                {
+                    "source_name": "KRX Open API",
+                    "service_name": f"{market} issue basic information",
+                    "market": market,
+                    "requested_base_date": base_date,
+                    "retrieved_at": result.retrieved_at,
+                    "request_parameters": json.dumps(
+                        {"basDd": base_date.replace("-", "")},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "raw_file_path": raw_path.as_posix(),
+                    "raw_file_sha256": hashlib.sha256(result.body).hexdigest(),
+                    "row_count": len(rows),
+                    "http_status": result.http_status,
+                }
+            )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with manifest_path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=MANIFEST_FIELDS)
@@ -138,8 +138,12 @@ def collect_pilot(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect the fixed KRX historical-master pilot")
-    parser.add_argument("--root", type=Path, default=Path("data/raw/krx/master/openapi"))
+    parser = argparse.ArgumentParser(
+        description="Collect the fixed KRX historical-master pilot"
+    )
+    parser.add_argument(
+        "--root", type=Path, default=Path("data/raw/krx/master/openapi")
+    )
     args = parser.parse_args()
     records = collect_pilot(root=args.root)
     print(f"Collected {len(records)} KRX pilot snapshots.")
