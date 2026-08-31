@@ -259,6 +259,17 @@ class OrderLedger:
             raise LedgerValidationError("cannot fill unknown order")
         return self._append_from_current(current, OrderStatus.FILLED, event_key)
 
+    def append_rejected(
+        self,
+        order_id: str,
+        *,
+        event_key: EventKey,
+    ) -> OrderLedgerEntry:
+        current = self.latest(order_id)
+        if current is None:
+            raise LedgerValidationError("cannot reject unknown order")
+        return self._append_from_current(current, OrderStatus.REJECTED, event_key)
+
     def _append(
         self,
         *,

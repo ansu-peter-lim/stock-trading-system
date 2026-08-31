@@ -324,7 +324,11 @@ T 종가 기준의 deterministic 피벗 선택 규칙은 다음과 같다.
 
 ### 8.4 상승 추세
 
-- MA20 ±3% 접근 구간에서 Core 매수 후보를 만든다.
+- 조정주가 계열에서 `lower = signal_MA20 * 0.97`,
+  `upper = signal_MA20 * 1.03`으로 계산한다. `lower <= signal_low <= upper`
+  또는 `lower <= signal_close <= upper`이면 MA20 ±3% 접근으로 판정하여 Core
+  매수 후보를 만든다. 경계는 inclusive다. `signal_high`와 일봉 전체
+  `[signal_low, signal_high]`의 단순 overlap은 이 판정에 사용하지 않는다.
 - Core 신규 진입 목표는 `stock_full_weight * 0.90`이다. 가격이 MA10 이상이면 일봉 신호만으로 해당 종목 FULL의 100%까지 추격하지 않으며, 나머지 `stock_full_weight * 0.10`은 이후 새 Tactical GC가 발생할 때만 추가한다.
 - 보유 중 종가가 MA20 아래이면 full exit pending을 만든다.
 

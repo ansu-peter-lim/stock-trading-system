@@ -258,7 +258,19 @@ MA20 × 0.97
 ~
 MA20 × 1.03
 
-해당 영역에 도달하면 매수 후보가 된다.
+`lower = signal_MA20 × 0.97`, `upper = signal_MA20 × 1.03`으로 두고,
+조정주가 계열의 `signal_low` 또는 `signal_close` 중 하나가 다음 inclusive
+범위에 있으면 해당 영역에 도달한 것으로 판정하여 매수 후보가 된다.
+
+```text
+lower <= signal_low <= upper
+OR
+lower <= signal_close <= upper
+```
+
+`signal_high`는 이 접근 판정에 사용하지 않는다. `signal_low`와
+`signal_close`가 모두 범위 밖인데 일봉 전체 가격 범위만 MA20 ±3% 영역을
+통과하는 경우도 접근으로 인정하지 않는다.
 
 FULL은 전체 계좌금액이 아니라:
 
