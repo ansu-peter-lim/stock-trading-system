@@ -21,6 +21,7 @@ from src.kiwoom_minute import (
     MinutePriceBasis,
     MinuteSourceBar,
     MinuteValidationError,
+    UpEntryPolicy,
     align_source_bars,
     collect_minute_series,
     parse_minute_page,
@@ -246,6 +247,43 @@ def source_bar(
 
 
 class SequenceProofTests(unittest.TestCase):
+    def test_low_required_policy_rejects_a_close_only_candidate(self) -> None:
+        daily, days = daily_fixture()
+        candidate = daily[65]
+        close_only_signal = Ohlcv(
+            candidate.signal.open,
+            candidate.signal.high,
+            D("140"),
+            D("155.5"),
+            candidate.signal.volume,
+        )
+        daily[65] = DailyBar(
+            candidate.stock_code,
+            candidate.trade_date,
+            close_only_signal,
+            close_only_signal,
+        )
+        start = datetime.combine(days[64], time(9), tzinfo=KOREA_TZ)
+        bars = [
+            source_bar(index, start + timedelta(minutes=5 * index), str(100 + index))
+            for index in range(60)
+        ]
+        kwargs = {
+            "daily_bars": daily,
+            "source_bars": bars,
+            "calendar": ExplicitTradingCalendar(days),
+            "research_start": days[65],
+            "research_end": days[65],
+            "stock_full_weight": D("0.10"),
+            "initial_capital": D("100000"),
+        }
+        baseline = run_up_path_sequence_proof(**kwargs)
+        variant = run_up_path_sequence_proof(
+            **kwargs, entry_policy=UpEntryPolicy.LOW_REQUIRED
+        )
+        self.assertEqual(1, baseline["counts"]["daily_up_candidates"])
+        self.assertEqual(0, variant["counts"]["daily_up_candidates"])
+
     def test_stateful_entry_and_exit_use_next_distinct_source_rows(self) -> None:
         daily, days = daily_fixture()
         bars: list[MinuteSourceBar] = []

@@ -13,7 +13,7 @@ from .pipeline import (
     collect_minute_series,
     parse_minute_page,
 )
-from .proof import run_up_path_sequence_proof
+from .proof import UpEntryPolicy, run_up_path_sequence_proof
 
 __all__ = [
     "ASSUMPTION_ID",
@@ -24,6 +24,7 @@ __all__ = [
     "MinutePriceBasis",
     "MinuteSourceBar",
     "MinuteValidationError",
+    "UpEntryPolicy",
     "align_source_bars",
     "collect_minute_series",
     "parse_minute_page",

@@ -6,9 +6,11 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date
 from decimal import ROUND_FLOOR, Decimal
+from enum import Enum
 from typing import Any
 
 from src.backtest_engine.core_strategy import (
+    DailyCoreSignal,
     DailyCoreSignalGenerator,
     DailyTrendClassifier,
 )
@@ -24,6 +26,13 @@ from src.backtest_engine.trading_calendar import TradingCalendar
 from .pipeline import ASSUMPTION_ID, MinuteSourceBar
 
 
+class UpEntryPolicy(str, Enum):
+    """The two explicitly authorized UP-entry policies for this experiment."""
+
+    BASELINE = "BASELINE_LOW_OR_CLOSE"
+    LOW_REQUIRED = "VARIANT_LOW_REQUIRED"
+
+
 def run_up_path_sequence_proof(
     *,
     daily_bars: Sequence[DailyBar],
@@ -33,6 +42,7 @@ def run_up_path_sequence_proof(
     research_end: date,
     stock_full_weight: Decimal,
     initial_capital: Decimal,
+    entry_policy: UpEntryPolicy = UpEntryPolicy.BASELINE,
 ) -> dict[str, Any]:
     """Run only the already-defined V1 UP Core path on source-bar order.
 
@@ -40,6 +50,8 @@ def run_up_path_sequence_proof(
     it is not represented as an interval START or END timestamp.
     """
 
+    if not isinstance(entry_policy, UpEntryPolicy):
+        raise TypeError("entry_policy must be an UpEntryPolicy")
     if research_start > research_end:
         raise ValueError("research_start must not follow research_end")
     if not source_bars:
@@ -286,6 +298,13 @@ def run_up_path_sequence_proof(
             holding_core=False,
             stock_full_weight=stock_full_weight,
         )
+        potential = _apply_entry_policy(
+            potential,
+            daily_bar,
+            daily_point,
+            entry_policy,
+            generator.config.uptrend_ma20_band_pct,
+        )
         if (
             potential is not None
             and potential.signal_type.value == "DAILY_ENTRY_SIGNAL"
@@ -300,6 +319,13 @@ def run_up_path_sequence_proof(
             daily_point,
             holding_core=quantity > 0,
             stock_full_weight=stock_full_weight,
+        )
+        actual = _apply_entry_policy(
+            actual,
+            daily_bar,
+            daily_point,
+            entry_policy,
+            generator.config.uptrend_ma20_band_pct,
         )
         if actual is None:
             continue
@@ -322,6 +348,7 @@ def run_up_path_sequence_proof(
 
     return {
         "assumption_id": ASSUMPTION_ID,
+        "entry_policy": entry_policy.value,
         "stock_code": stock_code,
         "research_start": research_start.isoformat(),
         "research_end": research_end.isoformat(),
@@ -423,7 +450,29 @@ def _daily_snapshot(
         "signal_sma60": point.sma60,
         "ma20_slope_5": point.ma20_slope_5,
         "ma60_slope_5": point.ma60_slope_5,
+        "daily_return": point.daily_return,
     }
+
+
+def _apply_entry_policy(
+    signal: DailyCoreSignal | None,
+    bar: DailyBar,
+    point: DailyIndicatorPoint,
+    entry_policy: UpEntryPolicy,
+    band_pct: Decimal,
+) -> DailyCoreSignal | None:
+    """Filter entries only; holding exits and all other V1 rules stay unchanged."""
+
+    if signal is None or signal.signal_type.value != "DAILY_ENTRY_SIGNAL":
+        return signal
+    if entry_policy is UpEntryPolicy.BASELINE:
+        return signal
+    if point.sma20 is None:
+        return None
+    ratio = signal.signal_sma20 * band_pct / Decimal(100)
+    lower = signal.signal_sma20 - ratio
+    upper = signal.signal_sma20 + ratio
+    return signal if lower <= bar.signal.low <= upper else None
 
 
 def _holding_sessions(known_days: Sequence[date], start: date, end: date) -> int:
