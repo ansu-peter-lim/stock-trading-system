@@ -12,6 +12,13 @@ from src.backtest_engine.indicators import calculate_daily_indicators
 from src.backtest_engine.trading_calendar import ExplicitTradingCalendar
 from src.kiwoom_minute.small_up_path_proof import _load_existing_daily_bars
 
+from .audit import (
+    calculate_ma10_direction,
+    cross_review_events,
+    detect_ma10_ma20_crosses,
+    down_h1_metrics,
+    recent_cross_metrics,
+)
 from .chart import (
     ChartType,
     ReviewEvent,
@@ -57,6 +64,9 @@ def generate_initial_review_set() -> list[dict[str, str]]:
             up["stocks"][stock_code]["primary"]["completed_trades"], signal_text
         )
         events, classification = _up_events(trade)
+        events = events + _cross_events_in_range(
+            bars, signal_text, trade["exit_fill_date"]
+        )
         output.append(
             _render(
                 bars,
@@ -67,6 +77,7 @@ def generate_initial_review_set() -> list[dict[str, str]]:
                 f"up-{slug}",
                 "UP_BASELINE_WITH_LOW_REQUIRED_COMPARISON",
                 _up_summary(bars, trade, classification),
+                show_ma20_band=True,
             )
         )
 
@@ -84,7 +95,8 @@ def generate_initial_review_set() -> list[dict[str, str]]:
                 OUTPUT_ROOT / "down" / stock_code,
                 "down-completed-trade",
                 "DOWN_REVERSAL_V1_ZERO_COST",
-                _down_trade_summary(trade),
+                _down_trade_summary(bars, trade),
+                shade_context=True,
             )
         )
 
@@ -100,7 +112,12 @@ def generate_initial_review_set() -> list[dict[str, str]]:
                 OUTPUT_ROOT / "down" / stock_code,
                 "down-blocked",
                 "DOWN_REVERSAL_V1_ZERO_COST",
-                {"reason": audit["blocks"], **audit["snapshot"]},
+                {
+                    "reason": audit["blocks"],
+                    **audit["snapshot"],
+                    **_down_h1_summary(bars, event_text),
+                },
+                shade_context=True,
             )
         )
     return output
@@ -153,7 +170,7 @@ def _up_events(trade: dict[str, Any]) -> tuple[tuple[ReviewEvent, ...], str]:
         ReviewEvent(
             ReviewEventType.BASELINE_ENTRY_CANDIDATE,
             signal_date,
-            "CLOSE_ONLY" if classification == "CLOSE_ONLY" else "UP BUY",
+            classification,
             adjusted_plot_price=Decimal(snapshot["signal_close"]),
             details={"classification": classification},
         )
@@ -193,6 +210,29 @@ def _up_events(trade: dict[str, Any]) -> tuple[tuple[ReviewEvent, ...], str]:
         )
     )
     return tuple(events), classification
+
+
+def _cross_events_in_range(
+    bars: tuple[Any, ...], focus_text: str, end_text: str
+) -> tuple[ReviewEvent, ...]:
+    points = tuple(
+        calculate_daily_indicators(
+            bars, ExplicitTradingCalendar(bar.trade_date for bar in bars)
+        )
+    )
+    crosses = detect_ma10_ma20_crosses(points)
+    focus = date.fromisoformat(focus_text)
+    end = date.fromisoformat(end_text)
+    start_index = max(
+        0, next(index for index, bar in enumerate(bars) if bar.trade_date == focus) - 60
+    )
+    end_index = min(
+        len(bars) - 1,
+        next(index for index, bar in enumerate(bars) if bar.trade_date == end) + 20,
+    )
+    return cross_review_events(
+        [cross for cross in crosses if start_index <= cross.index <= end_index]
+    )
 
 
 def _down_trade_events(trade: dict[str, Any]) -> tuple[ReviewEvent, ...]:
@@ -297,14 +337,20 @@ def _down_block_events(audit: dict[str, Any]) -> tuple[ReviewEvent, ...]:
 def _up_summary(
     bars: tuple[Any, ...], trade: dict[str, Any], classification: str
 ) -> dict[str, Any]:
-    points = {
-        point.trade_date: point
-        for point in calculate_daily_indicators(
+    points = tuple(
+        calculate_daily_indicators(
             bars, ExplicitTradingCalendar(bar.trade_date for bar in bars)
         )
-    }
+    )
     signal_date = date.fromisoformat(trade["entry_daily_signal_date"])
-    point = points[signal_date]
+    index = next(
+        index for index, point in enumerate(points) if point.trade_date == signal_date
+    )
+    point = points[index]
+    direction = calculate_ma10_direction(points)[index]
+    cross_metrics = recent_cross_metrics(
+        points, detect_ma10_ma20_crosses(points), index
+    )
     return {
         "event_type": "UP_TRADE",
         "signal_date": signal_date,
@@ -317,6 +363,9 @@ def _up_summary(
         "slope20": point.ma20_slope_5,
         "slope60": point.ma60_slope_5,
         "daily_return": point.daily_return,
+        "ma10_current": point.sma10,
+        **direction,
+        **cross_metrics,
         "entry_fill_at": trade["entry_fill_source_label"],
         "entry_raw_price": trade["entry_raw_price"],
         "exit_signal_date": trade["exit_daily_signal_date"],
@@ -327,8 +376,18 @@ def _up_summary(
     }
 
 
-def _down_trade_summary(trade: dict[str, Any]) -> dict[str, Any]:
+def _down_trade_summary(bars: tuple[Any, ...], trade: dict[str, Any]) -> dict[str, Any]:
     snapshot = trade["entry_daily"]
+    points = tuple(
+        calculate_daily_indicators(
+            bars, ExplicitTradingCalendar(bar.trade_date for bar in bars)
+        )
+    )
+    signal_date = date.fromisoformat(trade["entry_daily_signal_date"])
+    index = next(
+        index for index, bar in enumerate(bars) if bar.trade_date == signal_date
+    )
+    h1 = down_h1_metrics(points, index)
     return {
         "event_type": "DOWN_TRADE",
         "signal_date": trade["entry_daily_signal_date"],
@@ -340,6 +399,7 @@ def _down_trade_summary(trade: dict[str, Any]) -> dict[str, Any]:
         "slope20": snapshot["ma20_slope_5_pct"],
         "slope60": snapshot["ma60_slope_5_pct"],
         "daily_return": snapshot["rise_pct"],
+        **h1,
         "entry_fill_at": trade["entry_fill_source_label"],
         "entry_raw_price": trade["entry_raw_price"],
         "exit_signal_date": trade["exit_daily_signal_date"],
@@ -348,6 +408,20 @@ def _down_trade_summary(trade: dict[str, Any]) -> dict[str, Any]:
         "trade_pnl": trade["pnl_pct"],
         "reason": trade["entry_branch"],
     }
+
+
+def _down_h1_summary(bars: tuple[Any, ...], signal_text: str) -> dict[str, Any]:
+    points = tuple(
+        calculate_daily_indicators(
+            bars, ExplicitTradingCalendar(bar.trade_date for bar in bars)
+        )
+    )
+    index = next(
+        index
+        for index, bar in enumerate(bars)
+        if bar.trade_date == date.fromisoformat(signal_text)
+    )
+    return down_h1_metrics(points, index)
 
 
 def _render(
@@ -359,6 +433,8 @@ def _render(
     slug: str,
     policy: str,
     summary: dict[str, Any],
+    show_ma20_band: bool = False,
+    shade_context: bool = False,
 ) -> dict[str, str]:
     calendar = ExplicitTradingCalendar(bar.trade_date for bar in bars)
     prepared = prepare_review_chart(
@@ -368,6 +444,8 @@ def _render(
         calendar=calendar,
         focus_date=focus_date,
         event_end_date=event_end_date,
+        show_ma20_band=show_ma20_band,
+        shade_below_sma10_context=shade_context,
     )
     filename = deterministic_chart_filename(
         prepared.stock_code,

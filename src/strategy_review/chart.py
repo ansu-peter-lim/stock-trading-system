@@ -53,6 +53,8 @@ class ReviewEventType(str, Enum):
     ENTRY_FILL = "ENTRY_FILL"
     DAILY_FULL_EXIT = "DAILY_FULL_EXIT"
     EXIT_FILL = "EXIT_FILL"
+    GOLDEN_CROSS = "GOLDEN_CROSS"
+    DEATH_CROSS = "DEATH_CROSS"
 
 
 FILL_EVENT_TYPES = frozenset({ReviewEventType.ENTRY_FILL, ReviewEventType.EXIT_FILL})
@@ -106,6 +108,8 @@ class PreparedReviewChart:
     indicators: tuple[DailyIndicatorPoint, ...]
     events: tuple[ReviewEvent, ...]
     event_indexes: tuple[int, ...]
+    show_ma20_band: bool = False
+    shade_below_sma10_context: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +184,8 @@ def prepare_review_chart(
     pre_sessions: int = 60,
     post_sessions: int = 20,
     open_ended: bool = False,
+    show_ma20_band: bool = False,
+    shade_below_sma10_context: bool = False,
 ) -> PreparedReviewChart:
     """Validate events and align existing engine SMA values to the window."""
 
@@ -219,6 +225,8 @@ def prepare_review_chart(
         event_indexes=tuple(
             date_to_index[event.event_date] for event in canonical_events
         ),
+        show_ma20_band=show_ma20_band,
+        shade_below_sma10_context=shade_below_sma10_context,
     )
 
 
@@ -312,14 +320,40 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
             color=color,
             linewidth=1.2,
         )
+    if prepared.show_ma20_band:
+        ma20 = [
+            float(point.sma20) if point.sma20 is not None else float("nan")
+            for point in prepared.indicators
+        ]
+        axis.fill_between(
+            range(len(ma20)),
+            [value * 0.97 for value in ma20],
+            [value * 1.03 for value in ma20],
+            color="#ffbf69",
+            alpha=0.18,
+            label="SMA20 +/-3%",
+        )
+    if prepared.shade_below_sma10_context:
+        below = [
+            point.sma10 is not None and bar.signal.close < point.sma10
+            for bar, point in zip(
+                prepared.window.bars, prepared.indicators, strict=True
+            )
+        ]
+        context_start: int | None = None
+        for index, is_below in enumerate(below + [False]):
+            if is_below and context_start is None:
+                context_start = index - 0.5
+            elif not is_below and context_start is not None:
+                axis.axvspan(context_start, index - 0.5, color="#7f8c8d", alpha=0.08)
+                context_start = None
     for ordinal, (event, event_index) in enumerate(
         zip(prepared.events, prepared.event_indexes, strict=True)
     ):
         if event.event_type in FILL_EVENT_TYPES:
             axis.axvline(event_index, color="#111111", linestyle="--", alpha=0.75)
-            text = f"{event.label} RAW {event.raw_fill_price} {event.source_label}"
             axis.annotate(
-                text,
+                event.label,
                 xy=(event_index, 0.98 - (ordinal % 4) * 0.045),
                 xycoords=("data", "axes fraction"),
                 fontsize=7,
@@ -329,8 +363,23 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
         else:
             price = event.adjusted_plot_price
             if price is not None:
-                axis.scatter(event_index, float(price), marker="^", s=45, zorder=5)
-                axis.annotate(event.label, (event_index, float(price)), fontsize=7)
+                marker = (
+                    "o"
+                    if event.event_type
+                    in {
+                        ReviewEventType.GOLDEN_CROSS,
+                        ReviewEventType.DEATH_CROSS,
+                    }
+                    else "^"
+                )
+                axis.scatter(event_index, float(price), marker=marker, s=45, zorder=5)
+                axis.annotate(
+                    event.label,
+                    (event_index, float(price)),
+                    xytext=(0, 8 + (ordinal % 3) * 8),
+                    textcoords="offset points",
+                    fontsize=7,
+                )
     axis.set_title(f"{prepared.stock_code} {prepared.chart_type.value}")
     axis.set_ylabel("SIGNAL_ADJUSTED price")
     axis.grid(alpha=0.18)
@@ -363,6 +412,8 @@ def _chart_metadata(
         "window_start": prepared.window.bars[0].trade_date,
         "window_end": prepared.window.bars[-1].trade_date,
         "render_backend": backend,
+        "show_ma20_band": prepared.show_ma20_band,
+        "shade_below_sma10_context": prepared.shade_below_sma10_context,
         "events": [asdict(event) for event in prepared.events],
         "summary": dict(summary or {}),
     }
@@ -557,6 +608,22 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
     for grid in range(1, 5):
         y = top + grid * (bottom - top) // 5
         canvas.line(left, y, right, y, (225, 225, 225))
+    if prepared.shade_below_sma10_context:
+        context_start: int | None = None
+        below = [
+            point.sma10 is not None and bar.signal.close < point.sma10
+            for bar, point in zip(
+                prepared.window.bars, prepared.indicators, strict=True
+            )
+        ]
+        for index, is_below in enumerate(below + [False]):
+            if is_below and context_start is None:
+                context_start = index
+            elif not is_below and context_start is not None:
+                canvas.rectangle(
+                    x_of(context_start), top, x_of(index - 1), bottom, (244, 244, 244)
+                )
+                context_start = None
     candle_width = max(1, min(5, (right - left) // max(1, len(bars) * 3)))
     for index, bar in enumerate(bars):
         x = x_of(index)
@@ -581,15 +648,26 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
             if previous is not None and current is not None:
                 canvas.line(*previous, *current, color, 2)
             previous = current
+    if prepared.show_ma20_band:
+        upper_previous: tuple[int, int] | None = None
+        lower_previous: tuple[int, int] | None = None
+        for index, point in enumerate(prepared.indicators):
+            if point.sma20 is None:
+                upper_previous = lower_previous = None
+                continue
+            upper = (x_of(index), y_of(point.sma20 * Decimal("1.03")))
+            lower = (x_of(index), y_of(point.sma20 * Decimal("0.97")))
+            if upper_previous is not None:
+                canvas.line(*upper_previous, *upper, (235, 175, 90))
+                canvas.line(*lower_previous, *lower, (235, 175, 90))
+            upper_previous, lower_previous = upper, lower
     for ordinal, (event, index) in enumerate(
         zip(prepared.events, prepared.event_indexes, strict=True)
     ):
         x = x_of(index)
         if event.event_type in FILL_EVENT_TYPES:
             canvas.line(x, top, x, bottom, (30, 30, 30))
-            annotation = (
-                f"{event.label} RAW {event.raw_fill_price} {event.source_label}"
-            )
+            annotation = event.label
             canvas.text(
                 max(left, min(x + 4, right - len(annotation) * 12)),
                 top + (ordinal % 5) * 18,
@@ -602,7 +680,7 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
             canvas.line(x, y - 6, x + 6, y + 6, (0, 0, 0), 2)
             canvas.text(
                 max(left, min(x + 7, right - len(event.label) * 12)),
-                max(top, y - 18),
+                top + (ordinal % 8) * 12,
                 event.label,
                 scale=1,
             )

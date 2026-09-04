@@ -169,6 +169,22 @@ def test_rendered_fill_keeps_raw_price_without_adjusted_coordinate(tmp_path) -> 
     assert event["adjusted_plot_price"] is None
 
 
+def test_up_band_and_down_context_overlay_flags_are_serialized(tmp_path) -> None:
+    bars = _bars(70)
+    prepared = prepare_review_chart(
+        bars,
+        chart_type=ChartType.STOCK_OVERVIEW,
+        show_ma20_band=True,
+        shade_below_sma10_context=True,
+    )
+    artifact = render_review_chart(
+        prepared, tmp_path / "overlays.png", strategy_policy="TEST"
+    )
+    metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["show_ma20_band"] is True
+    assert metadata["shade_below_sma10_context"] is True
+
+
 def test_event_outside_window_is_rejected() -> None:
     bars = _bars()
     event = ReviewEvent(
