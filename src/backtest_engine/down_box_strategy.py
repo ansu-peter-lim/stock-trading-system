@@ -1,4 +1,4 @@
-"""Signal-only DOWN_BOX_REVERSAL_V0_1 strategy.
+"""Signal-only DOWN_BOX_REVERSAL_V0_2 strategy.
 
 This module is intentionally separate from :mod:`down_strategy`.  It models
 daily setup, candidate, and exit signals using adjusted Daily prices only.  It
@@ -31,11 +31,11 @@ from .models import DailyBar
 from .trading_calendar import TradingCalendar
 from .validation import KOREA_TZ, validate_daily_bars
 
-STRATEGY_ID = "DOWN_BOX_REVERSAL_V0_1"
+STRATEGY_ID = "DOWN_BOX_REVERSAL_V0_2"
 
 
 class DownBoxValidationError(ValueError):
-    """Input or state violates the DOWN_BOX_REVERSAL_V0_1 contract."""
+    """Input or state violates the DOWN_BOX_REVERSAL_V0_2 contract."""
 
 
 class BoxSetupState(str, Enum):
@@ -43,6 +43,7 @@ class BoxSetupState(str, Enum):
     ENTRY_SIGNALLED = "ENTRY_SIGNALLED"
     BOX_POSITION = "BOX_POSITION"
     BREAKOUT_REENTRY_WAIT = "BREAKOUT_REENTRY_WAIT"
+    REENTRY_SIGNALLED = "REENTRY_SIGNALLED"
     EXPIRED = "EXPIRED"
     INVALIDATED = "INVALIDATED"
 
@@ -64,6 +65,13 @@ class BoxTerminalOutcome(str, Enum):
     EXPIRED = "EXPIRED"
     FLOOR_INVALIDATED = "FLOOR_INVALIDATED"
     UPPER_INVALIDATED = "UPPER_INVALIDATED"
+    BOX_BREAKOUT_CONFIRMED = "BOX_BREAKOUT_CONFIRMED"
+    END_OF_DATA_ACTIVE = "END_OF_DATA_ACTIVE"
+
+
+class BoxReentryTerminalOutcome(str, Enum):
+    BREAKOUT_REENTRY_CANDIDATE = "BREAKOUT_REENTRY_CANDIDATE"
+    BREAKOUT_FAILED = "BREAKOUT_FAILED"
     END_OF_DATA_ACTIVE = "END_OF_DATA_ACTIVE"
 
 
@@ -82,6 +90,8 @@ class BoxEventType(str, Enum):
     FLOOR_BREAK = "FLOOR_BREAK"
     UPPER_TAKE_PROFIT = "UPPER_TAKE_PROFIT"
     BOX_BREAKOUT = "BOX_BREAKOUT"
+    BOX_BREAKOUT_CONFIRMED = "BOX_BREAKOUT_CONFIRMED"
+    BREAKOUT_REENTRY_SETUP_CREATED = "BREAKOUT_REENTRY_SETUP_CREATED"
     BREAKOUT_REENTRY_WAIT = "BREAKOUT_REENTRY_WAIT"
     BREAKOUT_FAILED = "BREAKOUT_FAILED"
     BREAKOUT_REENTRY_CANDIDATE = "BREAKOUT_REENTRY_CANDIDATE"
@@ -102,7 +112,7 @@ class BoxSignalType(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class DownBoxStrategyConfig:
-    """V0.1 constants kept explicit so proof output is reproducible."""
+    """Frozen V0.1 parameters with the V0.2 breakout lifecycle correction."""
 
     strategy_id: str = STRATEGY_ID
     pivot_lookback_sessions: int = 60
@@ -116,7 +126,7 @@ class DownBoxStrategyConfig:
 
     def __post_init__(self) -> None:
         if self.strategy_id != STRATEGY_ID:
-            raise DownBoxValidationError("only DOWN_BOX_REVERSAL_V0_1 is supported")
+            raise DownBoxValidationError("only DOWN_BOX_REVERSAL_V0_2 is supported")
         if self.pivot_lookback_sessions != 60:
             raise DownBoxValidationError("V0.1 pivot lookback is fixed at 60 sessions")
         if self.upper_min_age_sessions != 10:
@@ -150,6 +160,8 @@ class BoxSetup:
     sessions_elapsed: int = 0
     rebreak_armed: bool = False
     half_exit_done: bool = False
+    parent_setup_id: str | None = None
+    breakout_date: date | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.setup_id, str) or not self.setup_id:
@@ -164,6 +176,17 @@ class BoxSetup:
             raise DownBoxValidationError("box_upper must be greater than box_floor")
         if self.sessions_elapsed < 0:
             raise DownBoxValidationError("sessions_elapsed must not be negative")
+        if self.state in {
+            BoxSetupState.BREAKOUT_REENTRY_WAIT,
+            BoxSetupState.REENTRY_SIGNALLED,
+        } and (
+            not self.parent_setup_id
+            or self.parent_setup_id == self.setup_id
+            or self.breakout_date is None
+        ):
+            raise DownBoxValidationError(
+                "reentry setup requires distinct parent identity and breakout date"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +492,26 @@ def _event(
     )
 
 
+def _create_reentry_setup(parent: BoxSetup, breakout_date: date) -> BoxSetup:
+    return BoxSetup(
+        setup_id=stable_id(
+            "down_box_reentry_setup",
+            parent.setup_id,
+            breakout_date,
+            parent.box_upper,
+        ),
+        stock_code=parent.stock_code,
+        setup_origin_date=breakout_date,
+        box_floor=parent.box_floor,
+        box_upper=parent.box_upper,
+        floor_pivot_date=parent.floor_pivot_date,
+        upper_pivot_date=parent.upper_pivot_date,
+        state=BoxSetupState.BREAKOUT_REENTRY_WAIT,
+        parent_setup_id=parent.setup_id,
+        breakout_date=breakout_date,
+    )
+
+
 def _find_index(bars: Sequence[DailyBar], day: date) -> int:
     indexes = [index for index, bar in enumerate(bars) if bar.trade_date == day]
     if len(indexes) != 1:
@@ -515,6 +558,47 @@ def evaluate_reversal_wait(
             _event(updated, BoxEventType.FLOOR_BREAK, day, "CLOSE_BELOW_BOX_FLOOR")
         )
         return BoxDayDecision(setup.stock_code, day, setup, updated, tuple(events), ())
+    if bar.signal.close > setup.box_upper:
+        reentry_setup = _create_reentry_setup(setup, day)
+        events.append(
+            _event(
+                setup,
+                BoxEventType.BOX_BREAKOUT_CONFIRMED,
+                day,
+                "CLOSE_ABOVE_FROZEN_BOX_UPPER",
+                {
+                    "breakout_close": bar.signal.close,
+                    "old_box_upper": setup.box_upper,
+                    "reentry_setup_id": reentry_setup.setup_id,
+                },
+            )
+        )
+        events.append(
+            _event(
+                reentry_setup,
+                BoxEventType.BREAKOUT_REENTRY_SETUP_CREATED,
+                day,
+                "PARENT_REVERSAL_BOX_BREAKOUT",
+                {"parent_setup_id": setup.setup_id},
+            )
+        )
+        events.append(
+            _event(
+                reentry_setup,
+                BoxEventType.BREAKOUT_REENTRY_WAIT,
+                day,
+                "FROZEN_OLD_BOX_UPPER",
+                {"parent_setup_id": setup.setup_id},
+            )
+        )
+        return BoxDayDecision(
+            setup.stock_code,
+            day,
+            setup,
+            reentry_setup,
+            tuple(events),
+            (),
+        )
     upper_sell = setup.box_upper * (Decimal(1) - policy.upper_sell_pct / Decimal(100))
     if bar.signal.high >= upper_sell:
         updated = replace(updated, state=BoxSetupState.INVALIDATED)
@@ -652,15 +736,29 @@ def evaluate_box_position(
             )
         )
     if bar.signal.close > setup.box_upper:
-        updated = replace(updated, state=BoxSetupState.BREAKOUT_REENTRY_WAIT)
+        reentry_setup = _create_reentry_setup(setup, day)
         events.append(
-            _event(updated, BoxEventType.BOX_BREAKOUT, day, "CLOSE_ABOVE_BOX_UPPER")
+            _event(setup, BoxEventType.BOX_BREAKOUT, day, "CLOSE_ABOVE_BOX_UPPER")
         )
         events.append(
             _event(
-                updated, BoxEventType.BREAKOUT_REENTRY_WAIT, day, "FROZEN_OLD_BOX_UPPER"
+                reentry_setup,
+                BoxEventType.BREAKOUT_REENTRY_SETUP_CREATED,
+                day,
+                "PARENT_BOX_POSITION_BREAKOUT",
+                {"parent_setup_id": setup.setup_id},
             )
         )
+        events.append(
+            _event(
+                reentry_setup,
+                BoxEventType.BREAKOUT_REENTRY_WAIT,
+                day,
+                "FROZEN_OLD_BOX_UPPER",
+                {"parent_setup_id": setup.setup_id},
+            )
+        )
+        updated = reentry_setup
     half = (
         not setup.half_exit_done
         and index >= 1
@@ -699,6 +797,11 @@ def evaluate_breakout_reentry(
         raise DownBoxValidationError("evaluation index out of range")
     bar, point = canonical[index], canonical_points[index]
     day = bar.trade_date
+    breakout_date = setup.breakout_date or setup.setup_origin_date
+    if day <= breakout_date:
+        raise DownBoxValidationError(
+            "BREAKOUT_REENTRY_WAIT starts after the breakout session"
+        )
     updated = setup
     events: list[BoxEvent] = []
     signals: list[BoxSignal] = []
@@ -726,6 +829,7 @@ def evaluate_breakout_reentry(
         and _touches(bar.signal.low, bar.signal.close, lower, upper)
     )
     if touch and bar.signal.close >= setup.box_upper and trend is DailyTrendState.UP:
+        updated = replace(setup, state=BoxSetupState.REENTRY_SIGNALLED)
         signals.append(
             _signal(
                 updated,
@@ -742,6 +846,22 @@ def evaluate_breakout_reentry(
                 "SMA10_BAND_AND_UP_TREND",
             )
         )
+        return BoxDayDecision(
+            setup.stock_code,
+            day,
+            setup,
+            updated,
+            tuple(events),
+            tuple(signals),
+        )
+    events.append(
+        _event(
+            updated,
+            BoxEventType.BREAKOUT_REENTRY_WAIT,
+            day,
+            "NO_TERMINAL_REENTRY_OUTCOME",
+        )
+    )
     return BoxDayDecision(
         setup.stock_code, day, setup, updated, tuple(events), tuple(signals)
     )
@@ -787,6 +907,7 @@ def run_down_box_signal_proof(
     rejections: Counter[str] = Counter()
     setup_origins: list[dict[str, Any]] = []
     setup_lifecycle: dict[str, dict[str, Any]] = {}
+    reentry_lifecycle: dict[str, dict[str, Any]] = {}
 
     def finalize_setup(
         setup: BoxSetup,
@@ -798,6 +919,25 @@ def run_down_box_signal_proof(
         if lifecycle["terminal_outcome"] is not None:
             raise DownBoxValidationError(
                 f"setup has multiple terminal outcomes: {setup.setup_id}"
+            )
+        lifecycle.update(
+            {
+                "terminal_outcome": outcome.value,
+                "terminal_date": day,
+                "terminal_reason": reason,
+            }
+        )
+
+    def finalize_reentry(
+        setup: BoxSetup,
+        outcome: BoxReentryTerminalOutcome,
+        day: date,
+        reason: str,
+    ) -> None:
+        lifecycle = reentry_lifecycle[setup.setup_id]
+        if lifecycle["terminal_outcome"] is not None:
+            raise DownBoxValidationError(
+                f"reentry setup has multiple terminal outcomes: {setup.setup_id}"
             )
         lifecycle.update(
             {
@@ -878,6 +1018,79 @@ def run_down_box_signal_proof(
             break
         events.extend(decision.events)
         signals.extend(decision.signals)
+        if active.state is BoxSetupState.BREAKOUT_REENTRY_WAIT:
+            reentry_signal = next(
+                (
+                    signal
+                    for signal in decision.signals
+                    if signal.signal_type is BoxSignalType.BREAKOUT_REENTRY_CANDIDATE
+                ),
+                None,
+            )
+            failed = next(
+                (
+                    event
+                    for event in decision.events
+                    if event.event_type is BoxEventType.BREAKOUT_FAILED
+                ),
+                None,
+            )
+            if reentry_signal is not None:
+                finalize_reentry(
+                    decision.setup_after,
+                    BoxReentryTerminalOutcome.BREAKOUT_REENTRY_CANDIDATE,
+                    decision.trade_date,
+                    "SMA10_BAND_AND_UP_TREND",
+                )
+                active = None
+            elif failed is not None:
+                finalize_reentry(
+                    decision.setup_after,
+                    BoxReentryTerminalOutcome.BREAKOUT_FAILED,
+                    decision.trade_date,
+                    failed.reason,
+                )
+                active = None
+            else:
+                active = decision.setup_after
+            continue
+
+        breakout = next(
+            (
+                event
+                for event in decision.events
+                if event.event_type is BoxEventType.BOX_BREAKOUT_CONFIRMED
+            ),
+            None,
+        )
+        if breakout is not None:
+            parent = active
+            reentry_setup = decision.setup_after
+            finalize_setup(
+                parent,
+                BoxTerminalOutcome.BOX_BREAKOUT_CONFIRMED,
+                decision.trade_date,
+                breakout.reason,
+            )
+            breakout_close = bar.signal.close
+            reentry_lifecycle[reentry_setup.setup_id] = {
+                "reentry_setup_id": reentry_setup.setup_id,
+                "parent_setup_id": parent.setup_id,
+                "stock_code": parent.stock_code,
+                "breakout_date": decision.trade_date,
+                "old_box_upper": parent.box_upper,
+                "breakout_close": breakout_close,
+                "breakout_close_vs_upper_pct": (
+                    (breakout_close - parent.box_upper)
+                    / parent.box_upper
+                    * Decimal(100)
+                ),
+                "terminal_outcome": None,
+                "terminal_date": None,
+                "terminal_reason": None,
+            }
+            active = reentry_setup
+            continue
         entry_signals = tuple(
             signal
             for signal in decision.signals
@@ -935,18 +1148,34 @@ def run_down_box_signal_proof(
         else:
             active = decision.setup_after
     if active is not None:
-        finalize_setup(
-            active,
-            BoxTerminalOutcome.END_OF_DATA_ACTIVE,
-            canonical[-1].trade_date,
-            "END_OF_DATA",
-        )
+        if active.state is BoxSetupState.BREAKOUT_REENTRY_WAIT:
+            finalize_reentry(
+                active,
+                BoxReentryTerminalOutcome.END_OF_DATA_ACTIVE,
+                canonical[-1].trade_date,
+                "END_OF_DATA",
+            )
+        else:
+            finalize_setup(
+                active,
+                BoxTerminalOutcome.END_OF_DATA_ACTIVE,
+                canonical[-1].trade_date,
+                "END_OF_DATA",
+            )
     if any(item["terminal_outcome"] is None for item in setup_lifecycle.values()):
         raise DownBoxValidationError("created setup has no terminal outcome")
     lifecycle_rows = tuple(
         sorted(
             setup_lifecycle.values(),
             key=lambda item: (item["setup_origin_date"], item["setup_id"]),
+        )
+    )
+    if any(item["terminal_outcome"] is None for item in reentry_lifecycle.values()):
+        raise DownBoxValidationError("created reentry setup has no terminal outcome")
+    reentry_rows = tuple(
+        sorted(
+            reentry_lifecycle.values(),
+            key=lambda item: (item["breakout_date"], item["reentry_setup_id"]),
         )
     )
     return {
@@ -958,6 +1187,7 @@ def run_down_box_signal_proof(
         ),
         "setup_rejections": dict(sorted(rejections.items())),
         "setup_lifecycle": lifecycle_rows,
+        "breakout_reentry_lifecycle": reentry_rows,
         "events": tuple(events),
         "signals": tuple(signals),
         "entry_candidate_count": sum(

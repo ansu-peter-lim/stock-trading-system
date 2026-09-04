@@ -11,6 +11,7 @@ from src.backtest_engine.down_box_strategy import (
     BoxDayDecision,
     BoxEventType,
     BoxOriginAnalysis,
+    BoxReentryTerminalOutcome,
     BoxSetup,
     BoxSetupIssue,
     BoxSetupState,
@@ -18,6 +19,8 @@ from src.backtest_engine.down_box_strategy import (
     BoxSignalType,
     BoxTerminalOutcome,
     DownBoxStrategyConfig,
+    DownBoxValidationError,
+    _create_reentry_setup,
     _select_floor_and_upper,
     analyze_box_origin,
     evaluate_box_position,
@@ -352,7 +355,7 @@ def test_breakout_reentry_requires_old_upper_and_up_trend() -> None:
     bars = _bars([100] * 10 + [150], lows=[98] * 10 + [105])
     points = list(_points(bars, slope=1))
     decision = evaluate_breakout_reentry(
-        _setup(bars[0].trade_date, state=BoxSetupState.BREAKOUT_REENTRY_WAIT),
+        _create_reentry_setup(_setup(bars[0].trade_date), bars[0].trade_date),
         bars,
         tuple(points),
         10,
@@ -454,4 +457,196 @@ def test_signal_proof_stops_reversal_wait_after_first_buy_candidate() -> None:
             "terminal_date": bars[1].trade_date,
             "terminal_reason": "FIRST_BUY_CANDIDATE_TERMINAL",
         },
+    )
+
+
+def test_reversal_wait_breakout_beats_upper_invalidation_and_entry() -> None:
+    bars = _bars([100] * 11 + [151], lows=[98] * 11 + [110])
+    decision = evaluate_reversal_wait(
+        _setup(bars[10].trade_date), bars, _points(bars), 11
+    )
+    assert decision.setup_after.state is BoxSetupState.BREAKOUT_REENTRY_WAIT
+    assert any(
+        event.event_type is BoxEventType.BOX_BREAKOUT_CONFIRMED
+        for event in decision.events
+    )
+    assert not any(
+        event.event_type is BoxEventType.SETUP_INVALIDATED for event in decision.events
+    )
+    assert decision.signals == ()
+
+
+def test_reversal_wait_close_equal_upper_is_upper_invalidation() -> None:
+    bars = _bars([100] * 11 + [150], lows=[98] * 11 + [145])
+    decision = evaluate_reversal_wait(
+        _setup(bars[10].trade_date), bars, _points(bars), 11
+    )
+    assert decision.setup_after.state is BoxSetupState.INVALIDATED
+    assert not any(
+        event.event_type is BoxEventType.BOX_BREAKOUT_CONFIRMED
+        for event in decision.events
+    )
+    assert any(event.reason == "HIGH_IN_UPPER_SELL_ZONE" for event in decision.events)
+
+
+def test_reversal_wait_upper_zone_without_breakout_is_invalidated() -> None:
+    bars = _bars([100] * 11 + [120], lows=[98] * 11 + [115])
+    last = bars[-1]
+    bars = (
+        *bars[:-1],
+        replace(
+            last,
+            raw=replace(last.raw, high=Decimal(147)),
+            signal=replace(last.signal, high=Decimal(147)),
+        ),
+    )
+    decision = evaluate_reversal_wait(
+        _setup(bars[10].trade_date), bars, _points(bars), 11
+    )
+    assert decision.setup_after.state is BoxSetupState.INVALIDATED
+    assert any(event.reason == "HIGH_IN_UPPER_SELL_ZONE" for event in decision.events)
+
+
+def test_reversal_wait_floor_break_has_highest_priority() -> None:
+    bars = _bars([100] * 11 + [79], lows=[98] * 11 + [78])
+    last = bars[-1]
+    bars = (
+        *bars[:-1],
+        replace(
+            last,
+            raw=replace(last.raw, high=Decimal(160)),
+            signal=replace(last.signal, high=Decimal(160)),
+        ),
+    )
+    decision = evaluate_reversal_wait(
+        _setup(bars[10].trade_date), bars, _points(bars), 11
+    )
+    assert decision.setup_after.state is BoxSetupState.INVALIDATED
+    assert any(
+        event.event_type is BoxEventType.FLOOR_BREAK for event in decision.events
+    )
+    assert not any(
+        event.event_type is BoxEventType.BOX_BREAKOUT_CONFIRMED
+        for event in decision.events
+    )
+
+
+def test_breakout_creates_distinct_reentry_setup_with_frozen_upper() -> None:
+    parent = _setup()
+    reentry = _create_reentry_setup(parent, date(2024, 1, 3))
+    repeated = _create_reentry_setup(parent, date(2024, 1, 3))
+    assert reentry.setup_id != parent.setup_id
+    assert reentry.setup_id == repeated.setup_id
+    assert reentry.parent_setup_id == parent.setup_id
+    assert reentry.box_upper == parent.box_upper
+    assert reentry.breakout_date == date(2024, 1, 3)
+
+
+def test_breakout_reentry_cannot_be_evaluated_on_breakout_session() -> None:
+    bars = _bars([100] * 12)
+    setup = _create_reentry_setup(_setup(), bars[10].trade_date)
+    with pytest.raises(DownBoxValidationError, match="starts after"):
+        evaluate_breakout_reentry(setup, bars, _points(bars, slope=1), 10)
+
+
+def test_breakout_reentry_close_equal_upper_is_not_failure() -> None:
+    bars = _bars([100] * 11 + [150], lows=[98] * 11 + [145])
+    setup = _create_reentry_setup(_setup(bars[10].trade_date), bars[10].trade_date)
+    decision = evaluate_breakout_reentry(setup, bars, _points(bars), 11)
+    assert decision.setup_after.state is BoxSetupState.BREAKOUT_REENTRY_WAIT
+    assert not any(
+        event.event_type is BoxEventType.BREAKOUT_FAILED for event in decision.events
+    )
+
+
+@pytest.mark.parametrize(
+    ("closes", "lows"),
+    [
+        ([100] * 12, [98] * 11 + [97]),
+        ([897] * 11 + [927], [895] * 11 + [880]),
+    ],
+)
+def test_breakout_reentry_sma10_band_edges_are_inclusive(
+    closes: list[int], lows: list[int]
+) -> None:
+    bars = _bars(closes, lows=lows)
+    setup = _create_reentry_setup(
+        replace(_setup(bars[10].trade_date), box_upper=Decimal(90)),
+        bars[10].trade_date,
+    )
+    decision = evaluate_breakout_reentry(setup, bars, _points(bars, slope=1), 11)
+    assert decision.setup_after.state is BoxSetupState.REENTRY_SIGNALLED
+    assert decision.signals[0].signal_type is BoxSignalType.BREAKOUT_REENTRY_CANDIDATE
+
+
+def test_breakout_reentry_requires_close_above_upper_and_up_trend() -> None:
+    bars = _bars([100] * 12, lows=[98] * 11 + [97])
+    failed = evaluate_breakout_reentry(
+        _create_reentry_setup(
+            replace(_setup(bars[10].trade_date), box_upper=Decimal(101)),
+            bars[10].trade_date,
+        ),
+        bars,
+        _points(bars, slope=1),
+        11,
+    )
+    assert failed.setup_after.state is BoxSetupState.INVALIDATED
+    no_up = evaluate_breakout_reentry(
+        _create_reentry_setup(
+            replace(_setup(bars[10].trade_date), box_upper=Decimal(90)),
+            bars[10].trade_date,
+        ),
+        bars,
+        _points(bars, slope=-1),
+        11,
+    )
+    assert no_up.setup_after.state is BoxSetupState.BREAKOUT_REENTRY_WAIT
+    assert no_up.signals == ()
+
+
+def test_reentry_wait_has_no_arbitrary_expiry() -> None:
+    bars = _bars([100] * 30, lows=[80] * 30)
+    setup = _create_reentry_setup(
+        replace(_setup(bars[0].trade_date), box_upper=Decimal(90)),
+        bars[0].trade_date,
+    )
+    decision = evaluate_breakout_reentry(setup, bars, _points(bars), 29)
+    assert decision.setup_after.state is BoxSetupState.BREAKOUT_REENTRY_WAIT
+    assert not any(
+        event.event_type is BoxEventType.SETUP_EXPIRED for event in decision.events
+    )
+
+
+def test_signal_proof_tracks_unique_breakout_and_reentry_terminal_outcomes() -> None:
+    bars = _bars([100, 151, 151], lows=[98, 149, 149])
+    setup = _setup(bars[0].trade_date)
+    origin = BoxOriginAnalysis(
+        stock_code=setup.stock_code,
+        trade_date=setup.setup_origin_date,
+        setup=setup,
+        issue=None,
+        box_floor=setup.box_floor,
+        box_upper=setup.box_upper,
+        floor_pivot_date=setup.floor_pivot_date,
+        upper_pivot_date=setup.upper_pivot_date,
+        lower_zone_touched=True,
+        floor_integrity=True,
+        down_trend=True,
+    )
+    with patch(
+        "src.backtest_engine.down_box_strategy.analyze_box_origin",
+        return_value=origin,
+    ):
+        result = run_down_box_signal_proof(bars)
+
+    assert result["setup_lifecycle"][0]["terminal_outcome"] == (
+        BoxTerminalOutcome.BOX_BREAKOUT_CONFIRMED.value
+    )
+    assert result["breakout_reentry_lifecycle"][0]["terminal_outcome"] == (
+        BoxReentryTerminalOutcome.END_OF_DATA_ACTIVE.value
+    )
+    assert len({row["setup_id"] for row in result["setup_lifecycle"]}) == 1
+    assert (
+        len({row["reentry_setup_id"] for row in result["breakout_reentry_lifecycle"]})
+        == 1
     )

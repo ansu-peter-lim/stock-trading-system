@@ -16,12 +16,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from src.backtest_engine.core_strategy import DailyTrendClassifier
 from src.backtest_engine.down_box_strategy import (
     BoxEvent,
     BoxEventType,
     BoxSetup,
     BoxSignal,
     BoxSignalType,
+    DownBoxStrategyConfig,
     run_down_box_signal_proof,
 )
 from src.backtest_engine.indicators import (
@@ -52,8 +54,11 @@ UNIVERSE = (
     "034020",
     "066570",
 )
-OUTPUT_PATH = Path("data/processed/strategy_review/down_box_reversal_v0_1_proof.json")
-CHART_ROOT = Path("data/processed/strategy_charts/down_box_reversal_v0_1")
+OUTPUT_PATH = Path("data/processed/strategy_review/down_box_reversal_v0_2_proof.json")
+ENTRY_AUDIT_PATH = Path(
+    "data/processed/strategy_review/down_box_reversal_v0_1_entry_location_audit.json"
+)
+CHART_ROOT = Path("data/processed/strategy_charts/down_box_reversal_v0_2")
 
 _EVENT_MAP: dict[BoxEventType, tuple[ReviewEventType, str]] = {
     BoxEventType.LOWER_ZONE_TOUCH: (ReviewEventType.LOWER_ZONE_TOUCH, "LOWER ZONE"),
@@ -73,12 +78,16 @@ _EVENT_MAP: dict[BoxEventType, tuple[ReviewEventType, str]] = {
         ReviewEventType.UPPER_TAKE_PROFIT,
         "UPPER TAKE PROFIT",
     ),
+    BoxEventType.BOX_BREAKOUT_CONFIRMED: (
+        ReviewEventType.BOX_BREAKOUT,
+        "BOX BREAKOUT",
+    ),
     BoxEventType.BOX_BREAKOUT: (ReviewEventType.BOX_BREAKOUT, "BOX BREAKOUT"),
     BoxEventType.BREAKOUT_REENTRY_WAIT: (
         ReviewEventType.BREAKOUT_REENTRY_WAIT,
         "REENTRY WAIT",
     ),
-    BoxEventType.BREAKOUT_FAILED: (ReviewEventType.BREAKOUT_FAILED, "BREAKOUT FAILED"),
+    BoxEventType.BREAKOUT_FAILED: (ReviewEventType.BREAKOUT_FAILED, "BREAKOUT FAIL"),
     BoxEventType.BREAKOUT_REENTRY_CANDIDATE: (
         ReviewEventType.BREAKOUT_REENTRY_CANDIDATE,
         "REENTRY",
@@ -92,6 +101,224 @@ def _json_default(value: object) -> str:
     if hasattr(value, "value"):
         return str(value.value)
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
+
+
+def box_relative_position(
+    value: Decimal, box_floor: Decimal, box_upper: Decimal
+) -> Decimal:
+    """Return an unclamped Decimal position within a frozen box."""
+
+    if not all(isinstance(item, Decimal) for item in (value, box_floor, box_upper)):
+        raise ValueError("box position inputs must be Decimal")
+    box_range = box_upper - box_floor
+    if box_range <= 0:
+        raise ValueError("box range must be positive")
+    return (value - box_floor) / box_range
+
+
+def _percentile(values: Sequence[Decimal], quantile: Decimal) -> Decimal | None:
+    """Linear interpolation at ``(n - 1) * q`` on ascending Decimal values."""
+
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = Decimal(len(ordered) - 1) * quantile
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(ordered) - 1)
+    fraction = position - Decimal(lower_index)
+    return (
+        ordered[lower_index] + (ordered[upper_index] - ordered[lower_index]) * fraction
+    )
+
+
+def _entry_type_label(signal_type: BoxSignalType) -> str:
+    return {
+        BoxSignalType.ENTRY_CANDIDATE_MA5_TURN: "MA5_TURN",
+        BoxSignalType.ENTRY_CANDIDATE_SMA10_REBREAK: "SMA10_REBREAK",
+        BoxSignalType.ENTRY_CANDIDATE_MA5_TURN_AND_SMA10_REBREAK: "BOTH",
+    }[signal_type]
+
+
+def _entry_bucket(position: Decimal) -> str:
+    one_third = Decimal(1) / Decimal(3)
+    two_thirds = Decimal(2) / Decimal(3)
+    if position < one_third:
+        return "LOWER"
+    if position < two_thirds:
+        return "MIDDLE"
+    return "UPPER"
+
+
+def build_entry_location_rows(
+    result: Mapping[str, Any],
+    bars: Sequence[Any],
+    points: Sequence[Any],
+    config: DownBoxStrategyConfig | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Build deterministic, report-only location evidence for first entries."""
+
+    policy = config or DownBoxStrategyConfig()
+    canonical = tuple(sorted(bars, key=lambda item: item.trade_date))
+    point_by_date = {point.trade_date: point for point in points}
+    index_by_date = {bar.trade_date: index for index, bar in enumerate(canonical)}
+    sma5 = simple_moving_average([bar.signal.close for bar in canonical], 5)
+    setups = _setup_map(result)
+    rows: list[dict[str, Any]] = []
+    for setup in sorted(
+        setups.values(),
+        key=lambda item: (item.stock_code, item.setup_origin_date, item.setup_id),
+    ):
+        candidates = [
+            signal
+            for signal in result["signals"]
+            if signal.setup_id == setup.setup_id
+            and signal.signal_type.name.startswith("ENTRY_CANDIDATE")
+        ]
+        if not candidates:
+            continue
+        if len(candidates) != 1:
+            raise ValueError("entry location audit requires one candidate per setup")
+        candidate = candidates[0]
+        signal_index = index_by_date[candidate.signal_date]
+        origin_index = index_by_date[setup.setup_origin_date]
+        bar = canonical[signal_index]
+        point = point_by_date[candidate.signal_date]
+        lower_zone_upper = setup.box_floor * (
+            Decimal(1) + policy.lower_zone_pct / Decimal(100)
+        )
+        touch_dates = [
+            item.trade_date
+            for item in canonical[
+                max(0, origin_index - policy.origin_context_sessions) : signal_index + 1
+            ]
+            if setup.box_floor <= item.signal.low <= lower_zone_upper
+            or setup.box_floor <= item.signal.close <= lower_zone_upper
+        ]
+        most_recent_touch = touch_dates[-1] if touch_dates else None
+        sessions_since_touch = (
+            signal_index - index_by_date[most_recent_touch]
+            if most_recent_touch is not None
+            else None
+        )
+        close_position = box_relative_position(
+            bar.signal.close, setup.box_floor, setup.box_upper
+        )
+        rows.append(
+            {
+                "stock_code": setup.stock_code,
+                "setup_id": setup.setup_id,
+                "setup_origin_date": setup.setup_origin_date,
+                "entry_signal_date": candidate.signal_date,
+                "entry_type": _entry_type_label(candidate.signal_type),
+                "box_floor": setup.box_floor,
+                "box_upper": setup.box_upper,
+                "box_range": setup.box_upper - setup.box_floor,
+                "box_position_close": close_position,
+                "box_position_low": box_relative_position(
+                    bar.signal.low, setup.box_floor, setup.box_upper
+                ),
+                "most_recent_lower_zone_touch_date": most_recent_touch,
+                "sessions_since_lower_zone_touch": sessions_since_touch,
+                "sma5": sma5[signal_index],
+                "sma10": point.sma10,
+                "sma20": point.sma20,
+                "sma60": point.sma60,
+                "daily_trend_state": DailyTrendClassifier().classify(point).value,
+                "first_sma10_breakout_date": setup.setup_origin_date,
+                "descriptive_bucket": _entry_bucket(close_position),
+            }
+        )
+    return tuple(rows)
+
+
+def summarize_entry_locations(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Summarize location evidence without creating a strategy filter."""
+
+    summaries: dict[str, Any] = {}
+    for entry_type in ("MA5_TURN", "SMA10_REBREAK", "BOTH"):
+        group = [row for row in rows if row["entry_type"] == entry_type]
+        close_values = [row["box_position_close"] for row in group]
+        low_values = [row["box_position_low"] for row in group]
+        recency_values = [
+            Decimal(row["sessions_since_lower_zone_touch"])
+            for row in group
+            if row["sessions_since_lower_zone_touch"] is not None
+        ]
+        summaries[entry_type] = {
+            "count": len(group),
+            "box_position_close": {
+                "min": min(close_values) if close_values else None,
+                "p25": _percentile(close_values, Decimal("0.25")),
+                "median": _percentile(close_values, Decimal("0.50")),
+                "p75": _percentile(close_values, Decimal("0.75")),
+                "max": max(close_values) if close_values else None,
+            },
+            "box_position_low": {
+                "min": min(low_values) if low_values else None,
+                "median": _percentile(low_values, Decimal("0.50")),
+                "max": max(low_values) if low_values else None,
+            },
+            "sessions_since_lower_zone_touch": {
+                "min": min(recency_values) if recency_values else None,
+                "median": _percentile(recency_values, Decimal("0.50")),
+                "max": max(recency_values) if recency_values else None,
+            },
+        }
+    return summaries
+
+
+def run_entry_location_audit(
+    *,
+    output: Path = ENTRY_AUDIT_PATH,
+    stocks: Sequence[str] = UNIVERSE,
+) -> dict[str, Any]:
+    """Rerun the offline Daily proof and persist its entry-location evidence."""
+
+    rows: list[dict[str, Any]] = []
+    strategy_ids: set[str] = set()
+    for stock_code in sorted(stocks):
+        bars = _load_existing_daily_bars(stock_code)
+        calendar = ExplicitTradingCalendar(bar.trade_date for bar in bars)
+        points = tuple(calculate_daily_indicators(bars, calendar))
+        result = run_down_box_signal_proof(bars, calendar=calendar)
+        strategy_ids.add(result["strategy_id"])
+        rows.extend(build_entry_location_rows(result, bars, points))
+    rows.sort(
+        key=lambda item: (
+            item["stock_code"],
+            item["setup_origin_date"],
+            item["setup_id"],
+        )
+    )
+    result = {
+        "audit_version": "DOWN_BOX_ENTRY_LOCATION_AUDIT_V0_1",
+        "strategy_ids": sorted(strategy_ids),
+        "network_calls": 0,
+        "execution": {"five_minute": False, "fills": False, "pnl": False},
+        "position_policy": "unclamped Decimal (price - floor) / (upper - floor)",
+        "percentile_method": (
+            "ascending values; linear interpolation at (n - 1) * quantile"
+        ),
+        "bucket_policy": {
+            "LOWER": "position < 1/3",
+            "MIDDLE": "1/3 <= position < 2/3",
+            "UPPER": "position >= 2/3",
+            "usage": "report-only; not a strategy filter",
+        },
+        "entries": rows,
+        "entry_type_summary": summarize_entry_locations(rows),
+        "bucket_counts": dict(
+            sorted(Counter(row["descriptive_bucket"] for row in rows).items())
+        ),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+    return result
 
 
 def _event_price(
@@ -174,8 +401,14 @@ def _review_events(
 ) -> tuple[ReviewEvent, ...]:
     bars_by_date = {bar.trade_date: bar for bar in bars}
     events: list[ReviewEvent] = []
+    related_setup_ids = {setup.setup_id}
+    related_setup_ids.update(
+        item["reentry_setup_id"]
+        for item in result.get("breakout_reentry_lifecycle", ())
+        if item["parent_setup_id"] == setup.setup_id
+    )
     for event in result["events"]:
-        if event.setup_id != setup.setup_id:
+        if event.setup_id not in related_setup_ids:
             continue
         if (
             event.event_type is BoxEventType.SETUP_INVALIDATED
@@ -208,7 +441,7 @@ def _review_events(
             )
         )
     for signal in result["signals"]:
-        if signal.setup_id == setup.setup_id:
+        if signal.setup_id in related_setup_ids:
             events.append(_signal_review_event(signal, bars_by_date))
     return tuple(events)
 
@@ -224,11 +457,22 @@ def _setup_summary(
     origin_index = index_by_date[setup.setup_origin_date]
     origin_point = points[origin_index]
     sma5 = simple_moving_average([bar.signal.close for bar in bars], 5)[origin_index]
+    reentry_lifecycle = next(
+        (
+            item
+            for item in result.get("breakout_reentry_lifecycle", ())
+            if item["parent_setup_id"] == setup.setup_id
+        ),
+        {},
+    )
+    related_setup_ids = {setup.setup_id}
+    if reentry_lifecycle:
+        related_setup_ids.add(reentry_lifecycle["reentry_setup_id"])
     setup_events = [
-        event for event in result["events"] if event.setup_id == setup.setup_id
+        event for event in result["events"] if event.setup_id in related_setup_ids
     ]
     setup_signals = [
-        signal for signal in result["signals"] if signal.setup_id == setup.setup_id
+        signal for signal in result["signals"] if signal.setup_id in related_setup_ids
     ]
     lifecycle = next(
         (
@@ -304,7 +548,10 @@ def _setup_summary(
         "half_exit_signal_date": signal_dates.get(BoxSignalType.HALF_EXIT_SIGNAL),
         "floor_break_date": event_dates.get(BoxEventType.FLOOR_BREAK),
         "upper_take_profit_date": event_dates.get(BoxEventType.UPPER_TAKE_PROFIT),
-        "box_breakout_date": event_dates.get(BoxEventType.BOX_BREAKOUT),
+        "box_breakout_date": event_dates.get(
+            BoxEventType.BOX_BREAKOUT_CONFIRMED,
+            event_dates.get(BoxEventType.BOX_BREAKOUT),
+        ),
         "reentry_candidate_date": signal_dates.get(
             BoxSignalType.BREAKOUT_REENTRY_CANDIDATE
         ),
@@ -313,6 +560,13 @@ def _setup_summary(
         "terminal_outcome": lifecycle.get("terminal_outcome"),
         "terminal_date": lifecycle.get("terminal_date"),
         "terminal_reason": lifecycle.get("terminal_reason"),
+        "reentry_setup_id": reentry_lifecycle.get("reentry_setup_id"),
+        "breakout_close": reentry_lifecycle.get("breakout_close"),
+        "breakout_close_vs_upper_pct": reentry_lifecycle.get(
+            "breakout_close_vs_upper_pct"
+        ),
+        "reentry_outcome": reentry_lifecycle.get("terminal_outcome"),
+        "reentry_date": reentry_lifecycle.get("terminal_date"),
         "daily_candidate": candidate is not None,
         "actual_trade": False,
         "trade_pnl": None,
@@ -363,10 +617,12 @@ def _funnel(result: Mapping[str, Any]) -> dict[str, int]:
             event.reason == "HIGH_IN_UPPER_SELL_ZONE" for event in events
         ),
         "box_breakout_confirmed": sum(
-            event.event_type is BoxEventType.BOX_BREAKOUT for event in events
+            event.event_type is BoxEventType.BOX_BREAKOUT_CONFIRMED for event in events
         ),
+        "breakout_reentry_setup": len(result.get("breakout_reentry_lifecycle", ())),
         "breakout_reentry_wait": sum(
-            event.event_type is BoxEventType.BREAKOUT_REENTRY_WAIT for event in events
+            item["terminal_outcome"] == "END_OF_DATA_ACTIVE"
+            for item in result.get("breakout_reentry_lifecycle", ())
         ),
         "breakout_failed": sum(
             event.event_type is BoxEventType.BREAKOUT_FAILED for event in events
@@ -379,6 +635,12 @@ def _funnel(result: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _chart_category(summary: Mapping[str, Any]) -> str:
+    if summary["terminal_outcome"] == "BOX_BREAKOUT_CONFIRMED":
+        if summary["reentry_outcome"] == "BREAKOUT_REENTRY_CANDIDATE":
+            return "BREAKOUT_REENTRY"
+        if summary["reentry_outcome"] == "BREAKOUT_FAILED":
+            return "BREAKOUT_FAILED"
+        return "BOX_BREAKOUT"
     entry = summary["entry_type"]
     if entry == BoxSignalType.ENTRY_CANDIDATE_MA5_TURN.value:
         return "MA5_TURN"
@@ -398,7 +660,15 @@ def _chart_category(summary: Mapping[str, Any]) -> str:
 def _select_representative_charts(
     candidates: Sequence[tuple[str, str, BoxSetup, dict[str, Any], tuple[Any, ...]]],
 ) -> list[tuple[str, str, BoxSetup, dict[str, Any], tuple[Any, ...]]]:
-    """Select the bounded eight-chart lifecycle review set deterministically."""
+    """Select the bounded lifecycle review set deterministically."""
+
+    breakout_rows = [
+        item
+        for item in candidates
+        if item[3]["terminal_outcome"] == "BOX_BREAKOUT_CONFIRMED"
+    ]
+    if breakout_rows:
+        return breakout_rows[:6]
 
     targets = (
         ("MA5_TURN", 2),
@@ -478,7 +748,8 @@ def run_down_box_review_proof(
         "FLOOR_INVALIDATION": 4,
         "UPPER_INVALIDATION": 5,
         "BOX_BREAKOUT": 6,
-        "BREAKOUT_REENTRY": 7,
+        "BREAKOUT_FAILED": 7,
+        "BREAKOUT_REENTRY": 8,
     }
     chart_candidates.sort(
         key=lambda item: (
@@ -531,7 +802,7 @@ def run_down_box_review_proof(
         artifact = render_review_chart(
             prepared,
             chart_path,
-            strategy_policy="DOWN_BOX_REVERSAL_V0_1_SIGNAL_ONLY",
+            strategy_policy="DOWN_BOX_REVERSAL_V0_2_SIGNAL_ONLY",
             summary={**summary, "review_category": category},
         )
         summary["chart_path"] = artifact.png_path.as_posix()
@@ -541,10 +812,36 @@ def run_down_box_review_proof(
     all_funnels = Counter()
     for row in stock_rows.values():
         all_funnels.update(row["funnel"])
+    all_setup_rows = [
+        setup for stock in sorted(stock_rows) for setup in stock_rows[stock]["setups"]
+    ]
+    reversal_terminal_outcomes = Counter(
+        setup["terminal_outcome"] for setup in all_setup_rows
+    )
+    reentry_outcomes = Counter(
+        setup["reentry_outcome"]
+        for setup in all_setup_rows
+        if setup["reentry_outcome"] is not None
+    )
+    breakout_cases = [
+        {
+            "stock_code": setup["stock_code"],
+            "parent_setup_id": setup["setup_id"],
+            "reentry_setup_id": setup["reentry_setup_id"],
+            "breakout_date": setup["box_breakout_date"],
+            "old_box_upper": setup["box_upper"],
+            "breakout_close": setup["breakout_close"],
+            "breakout_close_vs_upper_pct": setup["breakout_close_vs_upper_pct"],
+            "reentry_outcome": setup["reentry_outcome"],
+            "reentry_date": setup["reentry_date"],
+        }
+        for setup in all_setup_rows
+        if setup["terminal_outcome"] == "BOX_BREAKOUT_CONFIRMED"
+    ]
     selected_rows = [item[3] for item in selected]
     result = {
-        "proof_version": "DOWN_BOX_REVERSAL_V0_1_VISUAL_PROOF",
-        "strategy_id": "DOWN_BOX_REVERSAL_V0_1",
+        "proof_version": "DOWN_BOX_REVERSAL_V0_2_VISUAL_PROOF",
+        "strategy_id": "DOWN_BOX_REVERSAL_V0_2",
         "network_calls": 0,
         "execution": {"five_minute": False, "fills": False, "pnl": False},
         "universe": sorted(stocks),
@@ -554,6 +851,9 @@ def run_down_box_review_proof(
             "price_basis": "Daily adjusted signal OHLC",
         },
         "overall_funnel": dict(sorted(all_funnels.items())),
+        "reversal_terminal_outcomes": dict(sorted(reversal_terminal_outcomes.items())),
+        "breakout_reentry_outcomes": dict(sorted(reentry_outcomes.items())),
+        "breakout_cases": breakout_cases,
         "per_stock": stock_rows,
         "review_order": [
             "MA5_TURN",
@@ -563,6 +863,7 @@ def run_down_box_review_proof(
             "FLOOR_INVALIDATION",
             "UPPER_INVALIDATION",
             "BOX_BREAKOUT",
+            "BREAKOUT_FAILED",
             "BREAKOUT_REENTRY",
         ],
         "selected_charts": selected_rows,
