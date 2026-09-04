@@ -31,6 +31,7 @@ class UpEntryPolicy(str, Enum):
 
     BASELINE = "BASELINE_LOW_OR_CLOSE"
     LOW_REQUIRED = "VARIANT_LOW_REQUIRED"
+    LOW_REQUIRED_MA10_3D_NON_DOWN = "VARIANT_LOW_REQUIRED_MA10_3D_NON_DOWN"
 
 
 def run_up_path_sequence_proof(
@@ -73,7 +74,19 @@ def run_up_path_sequence_proof(
     )
     _validate_source_sequence(canonical_source)
     daily_points = calculate_daily_indicators(canonical_daily, calendar)
+    daily_sma10 = simple_moving_average(
+        [bar.signal.close for bar in canonical_daily], 10
+    )
+    ma10_slope_3 = [
+        None
+        if index < 3
+        or daily_sma10[index] is None
+        or daily_sma10[index - 3] in (None, Decimal(0))
+        else (daily_sma10[index] / daily_sma10[index - 3] - Decimal(1)) * Decimal(100)
+        for index in range(len(canonical_daily))
+    ]
     daily_by_date = {bar.trade_date: bar for bar in canonical_daily}
+    daily_index = {bar.trade_date: index for index, bar in enumerate(canonical_daily)}
     point_by_date = {point.trade_date: point for point in daily_points}
     source_points = _source_indicators(canonical_source)
     by_date: dict[date, list[tuple[MinuteSourceBar, dict[str, Any]]]] = defaultdict(
@@ -304,6 +317,7 @@ def run_up_path_sequence_proof(
             daily_point,
             entry_policy,
             generator.config.uptrend_ma20_band_pct,
+            ma10_slope_3[daily_index[day]] if day in daily_index else None,
         )
         if (
             potential is not None
@@ -326,6 +340,7 @@ def run_up_path_sequence_proof(
             daily_point,
             entry_policy,
             generator.config.uptrend_ma20_band_pct,
+            ma10_slope_3[daily_index[day]] if day in daily_index else None,
         )
         if actual is None:
             continue
@@ -460,6 +475,7 @@ def _apply_entry_policy(
     point: DailyIndicatorPoint,
     entry_policy: UpEntryPolicy,
     band_pct: Decimal,
+    ma10_slope_3: Decimal | None = None,
 ) -> DailyCoreSignal | None:
     """Filter entries only; holding exits and all other V1 rules stay unchanged."""
 
@@ -472,7 +488,13 @@ def _apply_entry_policy(
     ratio = signal.signal_sma20 * band_pct / Decimal(100)
     lower = signal.signal_sma20 - ratio
     upper = signal.signal_sma20 + ratio
-    return signal if lower <= bar.signal.low <= upper else None
+    if not lower <= bar.signal.low <= upper:
+        return None
+    if entry_policy is UpEntryPolicy.LOW_REQUIRED_MA10_3D_NON_DOWN and (
+        ma10_slope_3 is None or ma10_slope_3 < 0
+    ):
+        return None
+    return signal
 
 
 def _holding_sessions(known_days: Sequence[date], start: date, end: date) -> int:
