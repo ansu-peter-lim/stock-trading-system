@@ -23,6 +23,7 @@ from typing import Any
 from src.backtest_engine.indicators import (
     DailyIndicatorPoint,
     calculate_daily_indicators,
+    simple_moving_average,
 )
 from src.backtest_engine.models import DailyBar
 from src.backtest_engine.trading_calendar import TradingCalendar
@@ -57,6 +58,23 @@ class ReviewEventType(str, Enum):
     DEATH_CROSS = "DEATH_CROSS"
     DECELERATION_PASS = "DECELERATION_PASS"
     DECELERATION_FAIL = "DECELERATION_FAIL"
+    LOWER_ZONE_TOUCH = "LOWER_ZONE_TOUCH"
+    FIRST_SMA10_BREAKOUT = "FIRST_SMA10_BREAKOUT"
+    REVERSAL_WAIT = "REVERSAL_WAIT"
+    ENTRY_SIGNALLED = "ENTRY_SIGNALLED"
+    EXPIRED = "EXPIRED"
+    MA5_TURN = "MA5_TURN"
+    MA5_BAND_TOUCH = "MA5_BAND_TOUCH"
+    SMA10_REBREAK = "SMA10_REBREAK"
+    BOX_BUY_CANDIDATE = "BOX_BUY_CANDIDATE"
+    HALF_EXIT_SIGNAL = "HALF_EXIT_SIGNAL"
+    FLOOR_BREAK = "FLOOR_BREAK"
+    UPPER_INVALIDATED = "UPPER_INVALIDATED"
+    UPPER_TAKE_PROFIT = "UPPER_TAKE_PROFIT"
+    BOX_BREAKOUT = "BOX_BREAKOUT"
+    BREAKOUT_REENTRY_WAIT = "BREAKOUT_REENTRY_WAIT"
+    BREAKOUT_FAILED = "BREAKOUT_FAILED"
+    BREAKOUT_REENTRY_CANDIDATE = "BREAKOUT_REENTRY_CANDIDATE"
 
 
 FILL_EVENT_TYPES = frozenset({ReviewEventType.ENTRY_FILL, ReviewEventType.EXIT_FILL})
@@ -112,6 +130,9 @@ class PreparedReviewChart:
     event_indexes: tuple[int, ...]
     show_ma20_band: bool = False
     shade_below_sma10_context: bool = False
+    show_sma5: bool = False
+    sma5: tuple[Decimal | None, ...] = ()
+    horizontal_levels: tuple[tuple[str, Decimal], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,11 +209,14 @@ def prepare_review_chart(
     open_ended: bool = False,
     show_ma20_band: bool = False,
     shade_below_sma10_context: bool = False,
+    show_sma5: bool = False,
+    horizontal_levels: Mapping[str, Decimal] | None = None,
 ) -> PreparedReviewChart:
     """Validate events and align existing engine SMA values to the window."""
 
     canonical = _canonical_bars(bars)
     full_points = tuple(calculate_daily_indicators(canonical, calendar))
+    full_sma5 = simple_moving_average([bar.signal.close for bar in canonical], 5)
     window = select_review_window(
         canonical,
         chart_type=chart_type,
@@ -218,6 +242,19 @@ def prepare_review_chart(
     ]
     if missing:
         raise ValueError(f"event dates outside selected review window: {missing}")
+    levels = tuple(
+        sorted(
+            ((str(label), value) for label, value in (horizontal_levels or {}).items()),
+            key=lambda item: item[0],
+        )
+    )
+    if any(
+        not label.strip() or not isinstance(value, Decimal) or value <= 0
+        for label, value in levels
+    ):
+        raise ValueError(
+            "horizontal levels require non-empty labels and positive Decimal values"
+        )
     return PreparedReviewChart(
         chart_type=chart_type,
         stock_code=canonical[0].stock_code,
@@ -229,6 +266,9 @@ def prepare_review_chart(
         ),
         show_ma20_band=show_ma20_band,
         shade_below_sma10_context=shade_below_sma10_context,
+        show_sma5=show_sma5,
+        sma5=tuple(full_sma5[window.start_index : window.end_index + 1]),
+        horizontal_levels=levels,
     )
 
 
@@ -309,18 +349,40 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
                 linewidth=0.7,
             )
         )
-    for field, label, color in (
-        ("sma10", "SMA10", "#9467bd"),
-        ("sma20", "SMA20", "#ff7f0e"),
-        ("sma60", "SMA60", "#2ca02c"),
-    ):
-        values = [getattr(point, field) for point in prepared.indicators]
+    series: list[tuple[str, Sequence[Decimal | None]]] = []
+    if prepared.show_sma5:
+        series.append(("SMA5", prepared.sma5))
+    series.extend(
+        (
+            ("SMA10", tuple(point.sma10 for point in prepared.indicators)),
+            ("SMA20", tuple(point.sma20 for point in prepared.indicators)),
+            ("SMA60", tuple(point.sma60 for point in prepared.indicators)),
+        )
+    )
+    colors = {
+        "SMA5": "#8c564b",
+        "SMA10": "#9467bd",
+        "SMA20": "#ff7f0e",
+        "SMA60": "#2ca02c",
+    }
+    for label, values in series:
         axis.plot(
             range(len(values)),
             [float(value) if value is not None else float("nan") for value in values],
             label=label,
-            color=color,
+            color=colors[label],
             linewidth=1.2,
+        )
+    for label, value in prepared.horizontal_levels:
+        axis.axhline(float(value), color="#555555", linestyle=":", linewidth=1.0)
+        axis.text(
+            1.0,
+            float(value),
+            f" {label}",
+            transform=axis.get_yaxis_transform(),
+            va="bottom",
+            ha="left",
+            fontsize=8,
         )
     if prepared.show_ma20_band:
         ma20 = [
@@ -416,6 +478,10 @@ def _chart_metadata(
         "render_backend": backend,
         "show_ma20_band": prepared.show_ma20_band,
         "shade_below_sma10_context": prepared.shade_below_sma10_context,
+        "show_sma5": prepared.show_sma5,
+        "horizontal_levels": {
+            label: value for label, value in prepared.horizontal_levels
+        },
         "events": [asdict(event) for event in prepared.events],
         "summary": dict(summary or {}),
     }
@@ -588,6 +654,9 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
             for value in (point.sma10, point.sma20, point.sma60)
             if value is not None
         )
+    if prepared.show_sma5:
+        values.extend(value for value in prepared.sma5 if value is not None)
+    values.extend(value for _, value in prepared.horizontal_levels)
     minimum, maximum = min(values), max(values)
     padding = max((maximum - minimum) * Decimal("0.05"), Decimal(1))
     minimum -= padding
@@ -638,6 +707,19 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
             y_of(min(bar.signal.open, bar.signal.close)),
             color,
         )
+
+    def draw_series(
+        series: Sequence[Decimal | None], color: tuple[int, int, int]
+    ) -> None:
+        previous: tuple[int, int] | None = None
+        for index, value in enumerate(series):
+            current = None if value is None else (x_of(index), y_of(value))
+            if previous is not None and current is not None:
+                canvas.line(*previous, *current, color, 2)
+            previous = current
+
+    if prepared.show_sma5:
+        draw_series(prepared.sma5, (140, 85, 75))
     for field, color in (
         ("sma10", (145, 80, 175)),
         ("sma20", (240, 125, 25)),
@@ -650,6 +732,10 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
             if previous is not None and current is not None:
                 canvas.line(*previous, *current, color, 2)
             previous = current
+    for label, value in prepared.horizontal_levels:
+        y = y_of(value)
+        canvas.line(left, y, right, y, (90, 90, 90), 1)
+        canvas.text(right - min(180, len(label) * 12), max(top, y - 12), label, scale=1)
     if prepared.show_ma20_band:
         upper_previous: tuple[int, int] | None = None
         lower_previous: tuple[int, int] | None = None
@@ -687,7 +773,7 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
                 scale=1,
             )
     canvas.text(left, 25, f"{prepared.stock_code} {prepared.chart_type.value}", scale=2)
-    canvas.text(left, 55, "SIGNAL ADJUSTED OHLC  SMA10  SMA20  SMA60", scale=1)
+    canvas.text(left, 55, "SIGNAL ADJUSTED OHLC  SMA5  SMA10  SMA20  SMA60", scale=1)
     for index in sorted({0, len(bars) // 2, len(bars) - 1}):
         canvas.text(
             max(left, x_of(index) - 30),
