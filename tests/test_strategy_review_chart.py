@@ -16,6 +16,7 @@ from src.strategy_review.chart import (
     prepare_review_chart,
     render_review_chart,
     select_review_window,
+    trading_session_date_ticks,
 )
 
 
@@ -61,6 +62,69 @@ def test_review_window_clamps_pre_and_post_boundaries() -> None:
     )
     assert (early.start_index, early.end_index) == (0, 22)
     assert (late.start_index, late.end_index) == (0, 29)
+
+
+def test_date_ticks_use_ten_included_sessions_and_day_labels() -> None:
+    ticks = trading_session_date_ticks(_bars(31))
+    assert [index for index, _ in ticks] == [0, 10, 20, 30]
+    assert [f"{day.day:02d}" for _, day in ticks] == ["01", "11", "21", "31"]
+
+
+def test_date_ticks_never_invent_weekend_or_holiday_sessions() -> None:
+    session_dates = (
+        date(2026, 1, 2),
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
+        date(2026, 1, 12),
+        date(2026, 1, 13),
+        date(2026, 1, 14),
+        date(2026, 1, 15),
+        date(2026, 1, 16),
+    )
+    bars = tuple(
+        DailyBar(
+            "005930",
+            day,
+            Ohlcv(Decimal(99), Decimal(101), Decimal(98), Decimal(100), 1),
+            Ohlcv(Decimal(99), Decimal(101), Decimal(98), Decimal(100), 1),
+        )
+        for day in session_dates
+    )
+    ticks = trading_session_date_ticks(bars)
+    assert [index for index, _ in ticks] == [0, 10]
+    assert [day for _, day in ticks] == [date(2026, 1, 2), date(2026, 1, 16)]
+
+
+def test_date_ticks_are_canonical_and_do_not_change_event_coordinates() -> None:
+    bars = _bars(31)
+    event = ReviewEvent(
+        ReviewEventType.DAILY_BUY_CANDIDATE,
+        bars[20].trade_date,
+        "BUY",
+        adjusted_plot_price=bars[20].signal.close,
+    )
+    first = prepare_review_chart(
+        bars,
+        chart_type=ChartType.EVENT_REVIEW,
+        focus_date=bars[20].trade_date,
+        events=(event,),
+    )
+    reversed_input = prepare_review_chart(
+        tuple(reversed(bars)),
+        chart_type=ChartType.EVENT_REVIEW,
+        focus_date=bars[20].trade_date,
+        events=(event,),
+    )
+    assert first.event_indexes == reversed_input.event_indexes == (20,)
+    assert trading_session_date_ticks(bars) == trading_session_date_ticks(
+        tuple(reversed(bars))
+    )
+    assert trading_session_date_ticks(first.window.bars) == trading_session_date_ticks(
+        reversed_input.window.bars
+    )
 
 
 def test_sma_alignment_reuses_full_existing_engine_history() -> None:
@@ -142,6 +206,20 @@ def test_empty_optional_events_and_metadata_contract(tmp_path) -> None:
     assert metadata["events"] == []
     assert metadata["price_axis_basis"] == "SIGNAL_ADJUSTED_DAILY_OHLC"
     assert metadata["fill_price_policy"] == "RAW_METADATA_ONLY_VERTICAL_DATE_MARKER"
+    assert metadata["x_axis_date_policy"] == "TRADING_SESSION_INTERVAL"
+    assert metadata["x_axis_date_interval_sessions"] == 10
+    assert metadata["x_axis_date_format"] == "DD"
+    assert metadata["x_axis_tick_indexes"] == [0, 10, 20, 30, 40, 50, 60]
+    assert metadata["x_axis_tick_labels"] == [
+        "01",
+        "11",
+        "21",
+        "31",
+        "10",
+        "20",
+        "02",
+    ]
+    assert all("-" not in label for label in metadata["x_axis_tick_labels"])
 
 
 def test_rendered_fill_keeps_raw_price_without_adjusted_coordinate(tmp_path) -> None:

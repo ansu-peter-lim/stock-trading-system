@@ -79,6 +79,10 @@ class ReviewEventType(str, Enum):
 
 FILL_EVENT_TYPES = frozenset({ReviewEventType.ENTRY_FILL, ReviewEventType.EXIT_FILL})
 
+X_AXIS_DATE_POLICY = "TRADING_SESSION_INTERVAL"
+X_AXIS_DATE_INTERVAL_SESSIONS = 10
+X_AXIS_DATE_FORMAT = "DD"
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewEvent:
@@ -142,6 +146,41 @@ class ChartArtifact:
     png_path: Path
     metadata_path: Path
     backend: str
+
+
+def trading_session_date_ticks(
+    bars: Sequence[DailyBar],
+    *,
+    interval_sessions: int = X_AXIS_DATE_INTERVAL_SESSIONS,
+) -> tuple[tuple[int, date], ...]:
+    """Return deterministic date ticks using included session indexes.
+
+    Bars are canonicalized by stock/date before indexing, so caller input
+    order cannot affect the result.  Ticks are anchored at index zero and
+    every ``interval_sessions`` bars thereafter.  A final bar is added only
+    when it is not too close to the preceding cadence tick.  Calendar-day
+    arithmetic is deliberately not used.
+    """
+
+    if interval_sessions <= 0:
+        raise ValueError("interval_sessions must be positive")
+    canonical = tuple(sorted(bars, key=lambda bar: (bar.stock_code, bar.trade_date)))
+    if not canonical:
+        return ()
+    indexes = list(range(0, len(canonical), interval_sessions))
+    last_index = len(canonical) - 1
+    if indexes[-1] != last_index and last_index - indexes[-1] >= interval_sessions:
+        indexes.append(last_index)
+    return tuple((index, canonical[index].trade_date) for index in indexes)
+
+
+def _event_label_lines(label: str) -> tuple[str, ...]:
+    words = tuple(label.split())
+    return words or (label,)
+
+
+def _day_label(value: date) -> str:
+    return f"{value.day:02d}"
 
 
 def _canonical_bars(bars: Sequence[DailyBar]) -> tuple[DailyBar, ...]:
@@ -417,12 +456,12 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
         if event.event_type in FILL_EVENT_TYPES:
             axis.axvline(event_index, color="#111111", linestyle="--", alpha=0.75)
             axis.annotate(
-                event.label,
+                "\n".join(_event_label_lines(event.label)),
                 xy=(event_index, 0.98 - (ordinal % 4) * 0.045),
                 xycoords=("data", "axes fraction"),
                 fontsize=7,
-                rotation=90,
                 va="top",
+                ha="center",
             )
         else:
             price = event.adjusted_plot_price
@@ -438,23 +477,24 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
                 )
                 axis.scatter(event_index, float(price), marker=marker, s=45, zorder=5)
                 axis.annotate(
-                    event.label,
+                    "\n".join(_event_label_lines(event.label)),
                     (event_index, float(price)),
                     xytext=(0, 8 + (ordinal % 3) * 8),
                     textcoords="offset points",
                     fontsize=7,
+                    ha="center",
                 )
     axis.set_title(f"{prepared.stock_code} {prepared.chart_type.value}")
     axis.set_ylabel("SIGNAL_ADJUSTED price")
     axis.grid(alpha=0.18)
     axis.legend(loc="upper left")
-    tick_step = max(1, len(prepared.window.bars) // 8)
-    ticks = list(range(0, len(prepared.window.bars), tick_step))
-    axis.set_xticks(ticks)
+    date_ticks = trading_session_date_ticks(prepared.window.bars)
+    axis.set_xticks([index for index, _ in date_ticks])
     axis.set_xticklabels(
-        [prepared.window.bars[index].trade_date.isoformat() for index in ticks],
-        rotation=35,
-        ha="right",
+        [_day_label(day) for _, day in date_ticks],
+        rotation=0,
+        ha="center",
+        fontsize=8,
     )
     figure.savefig(output_path, dpi=120)
     plt.close(figure)
@@ -466,6 +506,7 @@ def _chart_metadata(
     summary: Mapping[str, Any] | None,
     backend: str,
 ) -> dict[str, Any]:
+    date_ticks = trading_session_date_ticks(prepared.window.bars)
     return {
         "chart_type": prepared.chart_type.value,
         "stock_code": prepared.stock_code,
@@ -479,6 +520,12 @@ def _chart_metadata(
         "show_ma20_band": prepared.show_ma20_band,
         "shade_below_sma10_context": prepared.shade_below_sma10_context,
         "show_sma5": prepared.show_sma5,
+        "x_axis_date_policy": X_AXIS_DATE_POLICY,
+        "x_axis_date_interval_sessions": X_AXIS_DATE_INTERVAL_SESSIONS,
+        "x_axis_date_format": X_AXIS_DATE_FORMAT,
+        "x_axis_tick_indexes": [index for index, _ in date_ticks],
+        "x_axis_tick_dates": [day for _, day in date_ticks],
+        "x_axis_tick_labels": [_day_label(day) for _, day in date_ticks],
         "horizontal_levels": {
             label: value for label, value in prepared.horizontal_levels
         },
@@ -643,6 +690,23 @@ def _png_chunk(kind: bytes, data: bytes) -> bytes:
     )
 
 
+def _draw_centered_multiline_text(
+    canvas: _Canvas,
+    x: int,
+    y: int,
+    label: str,
+    *,
+    scale: int = 1,
+) -> None:
+    """Draw short event/date labels centered on their x-coordinate."""
+
+    line_height = 8 * scale
+    for line_number, line in enumerate(_event_label_lines(label)):
+        width = len(line) * 6 * scale
+        text_x = max(0, min(canvas.width - width, x - width // 2))
+        canvas.text(text_x, y + line_number * line_height, line, scale=scale)
+
+
 def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None:
     canvas = _Canvas(1400, 800)
     left, top, right, bottom = 80, 90, 1360, 720
@@ -755,30 +819,29 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
         x = x_of(index)
         if event.event_type in FILL_EVENT_TYPES:
             canvas.line(x, top, x, bottom, (30, 30, 30))
-            annotation = event.label
-            canvas.text(
-                max(left, min(x + 4, right - len(annotation) * 12)),
+            _draw_centered_multiline_text(
+                canvas,
+                x,
                 top + (ordinal % 5) * 18,
-                annotation,
-                scale=1,
+                event.label,
             )
         elif event.adjusted_plot_price is not None:
             y = y_of(event.adjusted_plot_price)
             canvas.line(x - 6, y + 6, x, y - 6, (0, 0, 0), 2)
             canvas.line(x, y - 6, x + 6, y + 6, (0, 0, 0), 2)
-            canvas.text(
-                max(left, min(x + 7, right - len(event.label) * 12)),
+            _draw_centered_multiline_text(
+                canvas,
+                x,
                 top + (ordinal % 8) * 12,
                 event.label,
-                scale=1,
             )
     canvas.text(left, 25, f"{prepared.stock_code} {prepared.chart_type.value}", scale=2)
     canvas.text(left, 55, "SIGNAL ADJUSTED OHLC  SMA5  SMA10  SMA20  SMA60", scale=1)
-    for index in sorted({0, len(bars) // 2, len(bars) - 1}):
-        canvas.text(
-            max(left, x_of(index) - 30),
+    for index, day in trading_session_date_ticks(bars):
+        _draw_centered_multiline_text(
+            canvas,
+            x_of(index),
             bottom + 10,
-            bars[index].trade_date.isoformat(),
-            scale=1,
+            _day_label(day),
         )
     canvas.write_png(output_path)
