@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from datetime import time as clock_time
@@ -70,6 +70,20 @@ class MinutePipelineIssue(str, Enum):
     REQUIRED_START_NOT_REACHED = "REQUIRED_START_NOT_REACHED"
     PROVENANCE_ERROR = "PROVENANCE_ERROR"
     RAW_SIGNAL_ALIGNMENT_ERROR = "RAW_SIGNAL_ALIGNMENT_ERROR"
+
+
+class MinuteFailureStage(str, Enum):
+    """Credential-safe stages emitted by the collection attempt observer."""
+
+    PRE_REQUEST = "PRE_REQUEST"
+    TRANSPORT_CALL = "TRANSPORT_CALL"
+    TRANSPORT_RETURNED = "TRANSPORT_RETURNED"
+    RAW_PERSISTENCE = "RAW_PERSISTENCE"
+    PAGINATION_VALIDATION = "PAGINATION_VALIDATION"
+    JSON_PARSE = "JSON_PARSE"
+    ROW_VALIDATION = "ROW_VALIDATION"
+    SOURCE_QUALITY_VALIDATION = "SOURCE_QUALITY_VALIDATION"
+    COMPLETE = "COMPLETE"
 
 
 class MinuteValidationError(ValueError):
@@ -424,10 +438,51 @@ def collect_minute_series(
     max_pages: int = 40,
     page_delay: float = 1.1,
     clock: Clock | None = None,
+    diagnostic: MutableMapping[str, object] | None = None,
 ) -> CollectedMinuteSeries:
+    if diagnostic is not None:
+        diagnostic.clear()
+        diagnostic.update(
+            {
+                "stock_code": request.stock_code,
+                "requested_date": request.end_date.isoformat(),
+                "request_sequence": 0,
+                "failure_stage": MinuteFailureStage.PRE_REQUEST.value,
+                "minute_validation_issue_code": None,
+                "transport_completed": False,
+                "response_object_available": False,
+                "response_bytes_available_to_pipeline": False,
+                "raw_persistence_started": False,
+                "raw_persistence_completed": False,
+                "parser_started": False,
+                "parser_completed": False,
+                "pagination_started": False,
+                "pagination_completed": False,
+                "outcome": "IN_PROGRESS",
+            }
+        )
+
+    def stage(value: MinuteFailureStage) -> None:
+        if diagnostic is not None:
+            diagnostic["failure_stage"] = value.value
+
+    def failed(exc: BaseException, value: MinuteFailureStage) -> None:
+        if diagnostic is None:
+            return
+        stage(value)
+        if isinstance(exc, MinuteValidationError):
+            diagnostic["minute_validation_issue_code"] = exc.issue.value
+        diagnostic["safe_exception_type"] = type(exc).__name__
+        diagnostic["outcome"] = "FAILED"
+
     if config.environment != "demo" or config.base_url != DEMO_BASE_URL:
+        failed(
+            ConfigurationError("demo configuration required"),
+            MinuteFailureStage.PRE_REQUEST,
+        )
         raise ConfigurationError("Only the fixed Kiwoom demo endpoint is allowed")
     if not 1 <= max_pages <= 100:
+        failed(ValueError("invalid max_pages"), MinuteFailureStage.PRE_REQUEST)
         raise ValueError("max_pages must be between 1 and 100")
     now = clock or (lambda: datetime.now(UTC))
     rows: list[ParsedMinuteRow] = []
@@ -436,6 +491,9 @@ def collect_minute_series(
     next_key = ""
     reached_start = False
     for sequence in range(1, max_pages + 1):
+        if diagnostic is not None:
+            diagnostic["request_sequence"] = sequence
+        stage(MinuteFailureStage.TRANSPORT_CALL)
         headers = _headers(token, sequence, next_key)
         body = {
             "stk_cd": request.stock_code,
@@ -446,18 +504,64 @@ def collect_minute_series(
         try:
             response = transport(config.base_url + CHART_PATH, headers, body)
         except KiwoomApiError as exc:
+            failed(
+                MinuteValidationError(MinutePipelineIssue.HTTP_ERROR, "request failed"),
+                MinuteFailureStage.TRANSPORT_CALL,
+            )
             raise MinuteValidationError(
                 MinutePipelineIssue.HTTP_ERROR, "ka10080 request failed"
             ) from exc
-        path, digest = store.store_page(request, sequence, response.body)
-        cont_yn, response_key = parse_pagination_headers(response.headers)
+        except Exception as exc:
+            failed(exc, MinuteFailureStage.TRANSPORT_CALL)
+            raise
+        if diagnostic is not None:
+            diagnostic["transport_completed"] = True
+            diagnostic["response_object_available"] = True
+            diagnostic["response_bytes_available_to_pipeline"] = True
+        stage(MinuteFailureStage.TRANSPORT_RETURNED)
+        if diagnostic is not None:
+            diagnostic["raw_persistence_started"] = True
+        try:
+            path, digest = store.store_page(request, sequence, response.body)
+        except Exception as exc:
+            failed(exc, MinuteFailureStage.RAW_PERSISTENCE)
+            raise
+        if diagnostic is not None:
+            diagnostic["raw_persistence_completed"] = True
+        if diagnostic is not None:
+            diagnostic["pagination_started"] = True
+        try:
+            cont_yn, response_key = parse_pagination_headers(response.headers)
+        except Exception as exc:
+            failed(exc, MinuteFailureStage.PAGINATION_VALIDATION)
+            raise
+        if diagnostic is not None:
+            diagnostic["pagination_completed"] = True
         if not 200 <= response.status < 300:
-            raise MinuteValidationError(
+            exc = MinuteValidationError(
                 MinutePipelineIssue.HTTP_ERROR, "ka10080 HTTP failure"
             )
-        page = parse_minute_page(
-            response.body, request, source_page=sequence, artifact_sha256=digest
-        )
+            failed(exc, MinuteFailureStage.PAGINATION_VALIDATION)
+            raise exc
+        if diagnostic is not None:
+            diagnostic["parser_started"] = True
+        try:
+            page = parse_minute_page(
+                response.body, request, source_page=sequence, artifact_sha256=digest
+            )
+        except MinuteValidationError as exc:
+            stage_value = (
+                MinuteFailureStage.JSON_PARSE
+                if exc.issue is MinutePipelineIssue.SCHEMA_ERROR
+                else MinuteFailureStage.ROW_VALIDATION
+            )
+            failed(exc, stage_value)
+            raise
+        except Exception as exc:
+            failed(exc, MinuteFailureStage.ROW_VALIDATION)
+            raise
+        if diagnostic is not None:
+            diagnostic["parser_completed"] = True
         retrieved = now().astimezone(UTC).isoformat().replace("+00:00", "Z")
         provenance = MinutePageProvenance(
             request.stock_code,
@@ -502,10 +606,15 @@ def collect_minute_series(
         if sequence < max_pages and page_delay:
             time.sleep(page_delay)
     if not reached_start:
-        raise MinuteValidationError(
+        exc = MinuteValidationError(
             MinutePipelineIssue.REQUIRED_START_NOT_REACHED,
             "pagination did not reach start_date",
         )
+        failed(exc, MinuteFailureStage.PAGINATION_VALIDATION)
+        raise exc
+    if diagnostic is not None:
+        diagnostic["failure_stage"] = MinuteFailureStage.COMPLETE.value
+        diagnostic["outcome"] = "SUCCESS"
     return CollectedMinuteSeries(request, tuple(rows), tuple(pages))
 
 
