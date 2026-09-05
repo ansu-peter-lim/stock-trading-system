@@ -159,6 +159,28 @@ def test_events_map_to_canonical_window_dates() -> None:
     )
 
 
+def test_event_can_request_an_emphasized_vertical_review_marker(tmp_path) -> None:
+    bars = _bars(70)
+    event = ReviewEvent(
+        ReviewEventType.BOX_BREAKOUT,
+        bars[60].trade_date,
+        "BAND EXIT T",
+        adjusted_plot_price=bars[60].signal.close,
+        details={"emphasize_vertical": True},
+    )
+    prepared = prepare_review_chart(
+        bars,
+        chart_type=ChartType.EVENT_REVIEW,
+        focus_date=bars[60].trade_date,
+        events=(event,),
+    )
+    artifact = render_review_chart(
+        prepared, tmp_path / "emphasized.png", strategy_policy="TEST"
+    )
+    metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["events"][0]["details"] == {"emphasize_vertical": True}
+
+
 def test_raw_fill_is_metadata_only_and_cannot_use_adjusted_y() -> None:
     with pytest.raises(ValueError, match="adjusted-axis"):
         ReviewEvent(

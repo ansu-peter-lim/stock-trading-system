@@ -453,6 +453,15 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
     for ordinal, (event, event_index) in enumerate(
         zip(prepared.events, prepared.event_indexes, strict=True)
     ):
+        if event.details and event.details.get("emphasize_vertical") is True:
+            axis.axvline(
+                event_index,
+                color="#111111",
+                linestyle="--",
+                linewidth=1.3,
+                alpha=0.85,
+                zorder=4,
+            )
         if event.event_type in FILL_EVENT_TYPES:
             axis.axvline(event_index, color="#111111", linestyle="--", alpha=0.75)
             axis.annotate(
