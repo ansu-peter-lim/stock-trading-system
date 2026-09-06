@@ -83,7 +83,18 @@ def test_local_source_inventory_is_clean_and_reproducible(tmp_path):
         assert daily["raw_adjusted_date_parity"] is True
         assert daily["raw"]["source_quality_anomalies"] == []
         assert daily["adjusted"]["source_quality_anomalies"] == []
-        assert minute["source_quality_anomalies"] == []
+        # V1.11 preserves the typed empty-row retention response as an
+        # immutable RAW artifact; it is the only expected post-checkpoint
+        # anomaly in this local inventory.
+        assert minute["source_quality_anomalies"] == [
+            "MALFORMED_MINUTE_TIMESTAMP:0",
+            "MISSING_MINUTE_FIELD:0",
+            "MISSING_MINUTE_FIELD:1",
+            "MISSING_MINUTE_FIELD:2",
+            "MISSING_MINUTE_FIELD:3",
+            "MISSING_MINUTE_FIELD:4",
+            "MISSING_MINUTE_FIELD:5",
+        ]
         assert minute["duplicate_timestamp_count"] == 0
         assert minute["covered_date_start"] == date(2025, 9, 1)
         assert minute["covered_date_end"] == date(2026, 8, 28)
