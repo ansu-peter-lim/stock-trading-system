@@ -136,6 +136,8 @@ class PreparedReviewChart:
     shade_below_sma10_context: bool = False
     show_sma5: bool = False
     sma5: tuple[Decimal | None, ...] = ()
+    show_sma120: bool = False
+    sma120: tuple[Decimal | None, ...] = ()
     horizontal_levels: tuple[tuple[str, Decimal], ...] = ()
 
 
@@ -249,6 +251,7 @@ def prepare_review_chart(
     show_ma20_band: bool = False,
     shade_below_sma10_context: bool = False,
     show_sma5: bool = False,
+    show_sma120: bool = False,
     horizontal_levels: Mapping[str, Decimal] | None = None,
 ) -> PreparedReviewChart:
     """Validate events and align existing engine SMA values to the window."""
@@ -256,6 +259,7 @@ def prepare_review_chart(
     canonical = _canonical_bars(bars)
     full_points = tuple(calculate_daily_indicators(canonical, calendar))
     full_sma5 = simple_moving_average([bar.signal.close for bar in canonical], 5)
+    full_sma120 = simple_moving_average([bar.signal.close for bar in canonical], 120)
     window = select_review_window(
         canonical,
         chart_type=chart_type,
@@ -307,6 +311,8 @@ def prepare_review_chart(
         shade_below_sma10_context=shade_below_sma10_context,
         show_sma5=show_sma5,
         sma5=tuple(full_sma5[window.start_index : window.end_index + 1]),
+        show_sma120=show_sma120,
+        sma120=tuple(full_sma120[window.start_index : window.end_index + 1]),
         horizontal_levels=levels,
     )
 
@@ -398,11 +404,14 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
             ("SMA60", tuple(point.sma60 for point in prepared.indicators)),
         )
     )
+    if prepared.show_sma120:
+        series.append(("SMA120", prepared.sma120))
     colors = {
         "SMA5": "#8c564b",
         "SMA10": "#9467bd",
         "SMA20": "#ff7f0e",
         "SMA60": "#2ca02c",
+        "SMA120": "#17becf",
     }
     for label, values in series:
         axis.plot(
@@ -529,6 +538,7 @@ def _chart_metadata(
         "show_ma20_band": prepared.show_ma20_band,
         "shade_below_sma10_context": prepared.shade_below_sma10_context,
         "show_sma5": prepared.show_sma5,
+        "show_sma120": prepared.show_sma120,
         "x_axis_date_policy": X_AXIS_DATE_POLICY,
         "x_axis_date_interval_sessions": X_AXIS_DATE_INTERVAL_SESSIONS,
         "x_axis_date_format": X_AXIS_DATE_FORMAT,
@@ -729,6 +739,8 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
         )
     if prepared.show_sma5:
         values.extend(value for value in prepared.sma5 if value is not None)
+    if prepared.show_sma120:
+        values.extend(value for value in prepared.sma120 if value is not None)
     values.extend(value for _, value in prepared.horizontal_levels)
     minimum, maximum = min(values), max(values)
     padding = max((maximum - minimum) * Decimal("0.05"), Decimal(1))
@@ -793,6 +805,8 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
 
     if prepared.show_sma5:
         draw_series(prepared.sma5, (140, 85, 75))
+    if prepared.show_sma120:
+        draw_series(prepared.sma120, (30, 160, 185))
     for field, color in (
         ("sma10", (145, 80, 175)),
         ("sma20", (240, 125, 25)),
