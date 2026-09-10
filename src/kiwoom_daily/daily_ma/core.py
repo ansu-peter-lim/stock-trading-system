@@ -67,3 +67,47 @@ def confirmed_breakdown(
         and close <= ma * Decimal("0.98")
         and previous_close > previous_ma * Decimal("0.98")
     )
+
+
+def structural_upward_inflection_state(
+    values: Sequence[Decimal | None], index: int, *, lookback: int
+) -> bool:
+    """Return the structural upward-inflection state at ``index``.
+
+    The reference low is the most recent minimum in the inclusive trailing
+    ``lookback`` MA-value window.  A state requires the current value to be
+    above that low, with no intervening value above the current one.  Missing
+    values or incomplete windows are unavailable rather than inferred.
+    """
+
+    if lookback <= 0:
+        raise ValueError("lookback must be positive")
+    if index < lookback - 1:
+        return False
+    window = values[index - lookback + 1 : index + 1]
+    if len(window) != lookback or any(value is None for value in window):
+        return False
+    numeric = tuple(value for value in window if value is not None)
+    minimum = min(numeric)
+    local_low_index = max(
+        offset for offset, value in enumerate(numeric) if value == minimum
+    )
+    current = numeric[-1]
+    if current <= minimum:
+        return False
+    return all(value <= current for value in numeric[local_low_index + 1 : -1])
+
+
+def structural_upward_inflection_events(
+    values: Sequence[Decimal | None], *, lookback: int
+) -> tuple[bool, ...]:
+    """Emit only false-to-true transitions of the structural state."""
+
+    states = tuple(
+        structural_upward_inflection_state(values, index, lookback=lookback)
+        for index in range(len(values))
+    )
+    return tuple(
+        state and (index == 0 or not states[index - 1])
+        for index, state in enumerate(states)
+    )

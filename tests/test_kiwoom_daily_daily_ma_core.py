@@ -11,6 +11,8 @@ from src.kiwoom_daily.daily_ma.core import (
     consecutive_below_ma_runs,
     ma_percentage_change,
     moving_averages,
+    structural_upward_inflection_events,
+    structural_upward_inflection_state,
 )
 from src.kiwoom_daily.daily_ma.data import load_local_daily_bars
 from src.kiwoom_daily.daily_ma_unified_buy_visual_proof_v0_1 import (
@@ -50,6 +52,38 @@ def test_below_runs_and_confirmation_boundaries() -> None:
     assert not confirmed_breakout(d(102), d(100), d(102), d(100))
     assert confirmed_breakdown(d(98), d(100), d("98.01"), d(100))
     assert not confirmed_breakdown(d(98), d(100), d(98), d(100))
+
+
+def test_structural_inflection_uses_recent_equal_low_and_event_transition() -> None:
+    values = (d(10), d(9), d(9), d(10), d(11))
+    assert not structural_upward_inflection_state(values, 2, lookback=4)
+    assert structural_upward_inflection_state(values, 3, lookback=4)
+    assert structural_upward_inflection_state(values, 4, lookback=4)
+    assert structural_upward_inflection_events(values, lookback=4) == (
+        False,
+        False,
+        False,
+        True,
+        False,
+    )
+
+
+def test_structural_inflection_rejects_higher_intermediate_and_incomplete_data() -> (
+    None
+):
+    assert not structural_upward_inflection_state(
+        (d(10), d(8), d(11), d(10)), 3, lookback=4
+    )
+    assert not structural_upward_inflection_state((d(9), d(10)), 1, lookback=5)
+    assert not structural_upward_inflection_state(
+        (d(9), None, d(9), d(10)), 3, lookback=4
+    )
+
+
+def test_structural_inflection_lookback_period_is_explicit() -> None:
+    values = (d(12), d(11), d(10), d(10), d(11))
+    assert structural_upward_inflection_state(values, 4, lookback=5)
+    assert not structural_upward_inflection_state(values, 4, lookback=10)
 
 
 @pytest.mark.parametrize("stock_code", STOCKS)

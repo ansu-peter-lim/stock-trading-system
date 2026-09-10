@@ -75,6 +75,10 @@ class ReviewEventType(str, Enum):
     BREAKOUT_REENTRY_WAIT = "BREAKOUT_REENTRY_WAIT"
     BREAKOUT_FAILED = "BREAKOUT_FAILED"
     BREAKOUT_REENTRY_CANDIDATE = "BREAKOUT_REENTRY_CANDIDATE"
+    MA_INFLECTION = "MA_INFLECTION"
+    MA_BREAKDOWN = "MA_BREAKDOWN"
+    DAILY_MA_BUY_SIGNAL = "DAILY_MA_BUY_SIGNAL"
+    RESISTANCE_REVIEW = "RESISTANCE_REVIEW"
 
 
 FILL_EVENT_TYPES = frozenset({ReviewEventType.ENTRY_FILL, ReviewEventType.EXIT_FILL})
@@ -138,6 +142,7 @@ class PreparedReviewChart:
     sma5: tuple[Decimal | None, ...] = ()
     show_sma120: bool = False
     sma120: tuple[Decimal | None, ...] = ()
+    ma_color_scheme: str = "DEFAULT"
     horizontal_levels: tuple[tuple[str, Decimal], ...] = ()
 
 
@@ -252,6 +257,7 @@ def prepare_review_chart(
     shade_below_sma10_context: bool = False,
     show_sma5: bool = False,
     show_sma120: bool = False,
+    ma_color_scheme: str = "DEFAULT",
     horizontal_levels: Mapping[str, Decimal] | None = None,
 ) -> PreparedReviewChart:
     """Validate events and align existing engine SMA values to the window."""
@@ -298,6 +304,8 @@ def prepare_review_chart(
         raise ValueError(
             "horizontal levels require non-empty labels and positive Decimal values"
         )
+    if ma_color_scheme not in {"DEFAULT", "DAILY_MA_RESEARCH"}:
+        raise ValueError("unsupported MA color scheme")
     return PreparedReviewChart(
         chart_type=chart_type,
         stock_code=canonical[0].stock_code,
@@ -313,6 +321,7 @@ def prepare_review_chart(
         sma5=tuple(full_sma5[window.start_index : window.end_index + 1]),
         show_sma120=show_sma120,
         sma120=tuple(full_sma120[window.start_index : window.end_index + 1]),
+        ma_color_scheme=ma_color_scheme,
         horizontal_levels=levels,
     )
 
@@ -373,6 +382,58 @@ def render_review_chart(
     return ChartArtifact(output_path, metadata_path, backend)
 
 
+def _ma_colors(scheme: str, *, matplotlib: bool) -> dict[str, object]:
+    """Return a small, explicit MA palette without changing legacy charts."""
+
+    if scheme == "DAILY_MA_RESEARCH":
+        return (
+            {
+                "SMA5": "#000000",
+                "SMA10": "#1565c0",
+                "SMA20": "#d32f2f",
+                "SMA60": "#2e7d32",
+                "SMA120": "#ef6c00",
+            }
+            if matplotlib
+            else {
+                "SMA5": (0, 0, 0),
+                "SMA10": (21, 101, 192),
+                "SMA20": (211, 47, 47),
+                "SMA60": (46, 125, 50),
+                "SMA120": (239, 108, 0),
+            }
+        )
+    return (
+        {
+            "SMA5": "#8c564b",
+            "SMA10": "#9467bd",
+            "SMA20": "#ff7f0e",
+            "SMA60": "#2ca02c",
+            "SMA120": "#17becf",
+        }
+        if matplotlib
+        else {
+            "SMA5": (140, 85, 75),
+            "SMA10": (145, 80, 175),
+            "SMA20": (240, 125, 25),
+            "SMA60": (45, 150, 75),
+            "SMA120": (30, 160, 185),
+        }
+    )
+
+
+def _event_marker(event_type: ReviewEventType) -> str:
+    if event_type in {ReviewEventType.MA_INFLECTION, ReviewEventType.MA5_TURN}:
+        return "o"
+    if event_type in {ReviewEventType.MA_BREAKDOWN, ReviewEventType.FLOOR_BREAK}:
+        return "v"
+    if event_type in {ReviewEventType.DAILY_MA_BUY_SIGNAL}:
+        return "*"
+    if event_type in {ReviewEventType.RESISTANCE_REVIEW}:
+        return "o"
+    return "^"
+
+
 def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
@@ -406,19 +467,13 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
     )
     if prepared.show_sma120:
         series.append(("SMA120", prepared.sma120))
-    colors = {
-        "SMA5": "#8c564b",
-        "SMA10": "#9467bd",
-        "SMA20": "#ff7f0e",
-        "SMA60": "#2ca02c",
-        "SMA120": "#17becf",
-    }
+    colors = _ma_colors(prepared.ma_color_scheme, matplotlib=True)
     for label, values in series:
         axis.plot(
             range(len(values)),
             [float(value) if value is not None else float("nan") for value in values],
             label=label,
-            color=colors[label],
+            color=str(colors[label]),
             linewidth=1.2,
         )
     for label, value in prepared.horizontal_levels:
@@ -484,16 +539,15 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
         else:
             price = event.adjusted_plot_price
             if price is not None:
-                marker = (
-                    "o"
-                    if event.event_type
-                    in {
-                        ReviewEventType.GOLDEN_CROSS,
-                        ReviewEventType.DEATH_CROSS,
-                    }
-                    else "^"
+                marker = _event_marker(event.event_type)
+                style = (
+                    {"facecolors": "none", "edgecolors": "#111111"}
+                    if event.event_type is ReviewEventType.RESISTANCE_REVIEW
+                    else {}
                 )
-                axis.scatter(event_index, float(price), marker=marker, s=45, zorder=5)
+                axis.scatter(
+                    event_index, float(price), marker=marker, s=60, zorder=5, **style
+                )
                 axis.annotate(
                     "\n".join(_event_label_lines(event.label)),
                     (event_index, float(price)),
@@ -539,6 +593,7 @@ def _chart_metadata(
         "shade_below_sma10_context": prepared.shade_below_sma10_context,
         "show_sma5": prepared.show_sma5,
         "show_sma120": prepared.show_sma120,
+        "ma_color_scheme": prepared.ma_color_scheme,
         "x_axis_date_policy": X_AXIS_DATE_POLICY,
         "x_axis_date_interval_sessions": X_AXIS_DATE_INTERVAL_SESSIONS,
         "x_axis_date_format": X_AXIS_DATE_FORMAT,
@@ -803,14 +858,16 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
                 canvas.line(*previous, *current, color, 2)
             previous = current
 
+    colors = _ma_colors(prepared.ma_color_scheme, matplotlib=False)
+
     if prepared.show_sma5:
-        draw_series(prepared.sma5, (140, 85, 75))
+        draw_series(prepared.sma5, colors["SMA5"])
     if prepared.show_sma120:
-        draw_series(prepared.sma120, (30, 160, 185))
+        draw_series(prepared.sma120, colors["SMA120"])
     for field, color in (
-        ("sma10", (145, 80, 175)),
-        ("sma20", (240, 125, 25)),
-        ("sma60", (45, 150, 75)),
+        ("sma10", colors["SMA10"]),
+        ("sma20", colors["SMA20"]),
+        ("sma60", colors["SMA60"]),
     ):
         previous: tuple[int, int] | None = None
         for index, point in enumerate(prepared.indicators):
@@ -850,8 +907,26 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
             )
         elif event.adjusted_plot_price is not None:
             y = y_of(event.adjusted_plot_price)
-            canvas.line(x - 6, y + 6, x, y - 6, (0, 0, 0), 2)
-            canvas.line(x, y - 6, x + 6, y + 6, (0, 0, 0), 2)
+            if event.event_type in {
+                ReviewEventType.MA_INFLECTION,
+                ReviewEventType.MA5_TURN,
+            }:
+                canvas.rectangle(x - 3, y - 3, x + 3, y + 3, (0, 0, 0))
+            elif event.event_type in {
+                ReviewEventType.MA_BREAKDOWN,
+                ReviewEventType.FLOOR_BREAK,
+            }:
+                canvas.line(x - 6, y - 5, x + 6, y - 5, (0, 0, 0), 2)
+                canvas.line(x - 6, y - 5, x, y + 6, (0, 0, 0), 2)
+                canvas.line(x, y + 6, x + 6, y - 5, (0, 0, 0), 2)
+            elif event.event_type is ReviewEventType.DAILY_MA_BUY_SIGNAL:
+                canvas.line(x - 6, y, x + 6, y, (0, 0, 0), 2)
+                canvas.line(x, y - 6, x, y + 6, (0, 0, 0), 2)
+                canvas.line(x - 4, y - 4, x + 4, y + 4, (0, 0, 0), 2)
+                canvas.line(x - 4, y + 4, x + 4, y - 4, (0, 0, 0), 2)
+            else:
+                canvas.line(x - 6, y + 6, x, y - 6, (0, 0, 0), 2)
+                canvas.line(x, y - 6, x + 6, y + 6, (0, 0, 0), 2)
             _draw_centered_multiline_text(
                 canvas,
                 x,
@@ -859,7 +934,9 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
                 event.label,
             )
     canvas.text(left, 25, f"{prepared.stock_code} {prepared.chart_type.value}", scale=2)
-    canvas.text(left, 55, "SIGNAL ADJUSTED OHLC  SMA5  SMA10  SMA20  SMA60", scale=1)
+    canvas.text(
+        left, 55, "SIGNAL ADJUSTED OHLC  SMA5  SMA10  SMA20  SMA60  SMA120", scale=1
+    )
     for index, day in trading_session_date_ticks(bars):
         _draw_centered_multiline_text(
             canvas,

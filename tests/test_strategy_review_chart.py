@@ -285,6 +285,24 @@ def test_up_band_and_down_context_overlay_flags_are_serialized(tmp_path) -> None
     assert metadata["shade_below_sma10_context"] is True
 
 
+def test_daily_ma_research_color_scheme_is_explicit_and_backward_compatible(
+    tmp_path,
+) -> None:
+    bars = _bars(130)
+    prepared = prepare_review_chart(
+        bars,
+        chart_type=ChartType.STOCK_OVERVIEW,
+        show_sma5=True,
+        show_sma120=True,
+        ma_color_scheme="DAILY_MA_RESEARCH",
+    )
+    artifact = render_review_chart(
+        prepared, tmp_path / "daily-ma-colors.png", strategy_policy="TEST"
+    )
+    metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["ma_color_scheme"] == "DAILY_MA_RESEARCH"
+
+
 def test_event_outside_window_is_rejected() -> None:
     bars = _bars()
     event = ReviewEvent(
