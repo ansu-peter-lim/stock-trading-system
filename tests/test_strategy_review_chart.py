@@ -12,7 +12,10 @@ from src.strategy_review.chart import (
     ChartType,
     ReviewEvent,
     ReviewEventType,
+    _ma_colors,
     deterministic_chart_filename,
+    overview_year_month_ticks,
+    overview_year_separator_indexes,
     prepare_review_chart,
     render_review_chart,
     select_review_window,
@@ -301,6 +304,56 @@ def test_daily_ma_research_color_scheme_is_explicit_and_backward_compatible(
     )
     metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
     assert metadata["ma_color_scheme"] == "DAILY_MA_RESEARCH"
+    assert _ma_colors("DAILY_MA_RESEARCH", matplotlib=True) == {
+        "SMA5": "#000000",
+        "SMA10": "#1565c0",
+        "SMA20": "#d32f2f",
+        "SMA60": "#2e7d32",
+        "SMA120": "#ef6c00",
+    }
+
+
+def test_overview_axis_uses_short_year_quarter_months_and_session_boundaries(
+    tmp_path,
+) -> None:
+    dates = (
+        date(2023, 10, 2),
+        date(2023, 10, 4),
+        date(2024, 1, 2),
+        date(2024, 4, 1),
+        date(2024, 7, 1),
+        date(2024, 10, 1),
+    )
+    bars = tuple(
+        DailyBar(
+            "005930",
+            day,
+            Ohlcv(Decimal(99), Decimal(101), Decimal(98), Decimal(100), 1),
+            Ohlcv(Decimal(99), Decimal(101), Decimal(98), Decimal(100), 1),
+        )
+        for day in dates
+    )
+    assert overview_year_month_ticks(bars) == (
+        (0, "23", "10"),
+        (2, "24", "01"),
+        (3, "", "04"),
+        (4, "", "07"),
+        (5, "", "10"),
+    )
+    assert overview_year_separator_indexes(tuple(reversed(bars))) == (2,)
+    prepared = prepare_review_chart(
+        tuple(reversed(bars)),
+        chart_type=ChartType.STOCK_OVERVIEW,
+        overview_year_month_axis=True,
+    )
+    artifact = render_review_chart(
+        prepared, tmp_path / "overview-axis.png", strategy_policy="TEST"
+    )
+    metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["overview_year_separator_indexes"] == [2]
+    labels = metadata["overview_year_month_ticks"]
+    assert [item["month"] for item in labels] == ["10", "01", "04", "07", "10"]
+    assert all("20" not in item["year"] for item in labels)
 
 
 def test_event_outside_window_is_rejected() -> None:

@@ -143,6 +143,7 @@ class PreparedReviewChart:
     show_sma120: bool = False
     sma120: tuple[Decimal | None, ...] = ()
     ma_color_scheme: str = "DEFAULT"
+    overview_year_month_axis: bool = False
     horizontal_levels: tuple[tuple[str, Decimal], ...] = ()
 
 
@@ -179,6 +180,38 @@ def trading_session_date_ticks(
     if indexes[-1] != last_index and last_index - indexes[-1] >= interval_sessions:
         indexes.append(last_index)
     return tuple((index, canonical[index].trade_date) for index in indexes)
+
+
+def overview_year_month_ticks(
+    bars: Sequence[DailyBar],
+) -> tuple[tuple[int, str, str], ...]:
+    """Return first-session quarterly ticks with two-digit year labels."""
+
+    canonical = tuple(sorted(bars, key=lambda bar: (bar.stock_code, bar.trade_date)))
+    first_by_month: dict[tuple[int, int], int] = {}
+    for index, bar in enumerate(canonical):
+        if bar.trade_date.month in {1, 4, 7, 10}:
+            first_by_month.setdefault(
+                (bar.trade_date.year, bar.trade_date.month), index
+            )
+    seen_years: set[int] = set()
+    output: list[tuple[int, str, str]] = []
+    for (year, month), index in sorted(first_by_month.items()):
+        year_label = f"{year % 100:02d}" if year not in seen_years else ""
+        output.append((index, year_label, f"{month:02d}"))
+        seen_years.add(year)
+    return tuple(output)
+
+
+def overview_year_separator_indexes(bars: Sequence[DailyBar]) -> tuple[int, ...]:
+    """Return first available trading-session indexes of later calendar years."""
+
+    canonical = tuple(sorted(bars, key=lambda bar: (bar.stock_code, bar.trade_date)))
+    return tuple(
+        index
+        for index, bar in enumerate(canonical)
+        if index > 0 and bar.trade_date.year != canonical[index - 1].trade_date.year
+    )
 
 
 def _event_label_lines(label: str) -> tuple[str, ...]:
@@ -258,6 +291,7 @@ def prepare_review_chart(
     show_sma5: bool = False,
     show_sma120: bool = False,
     ma_color_scheme: str = "DEFAULT",
+    overview_year_month_axis: bool = False,
     horizontal_levels: Mapping[str, Decimal] | None = None,
 ) -> PreparedReviewChart:
     """Validate events and align existing engine SMA values to the window."""
@@ -306,6 +340,8 @@ def prepare_review_chart(
         )
     if ma_color_scheme not in {"DEFAULT", "DAILY_MA_RESEARCH"}:
         raise ValueError("unsupported MA color scheme")
+    if overview_year_month_axis and chart_type is not ChartType.STOCK_OVERVIEW:
+        raise ValueError("year/month axis is supported only for overview charts")
     return PreparedReviewChart(
         chart_type=chart_type,
         stock_code=canonical[0].stock_code,
@@ -322,6 +358,7 @@ def prepare_review_chart(
         show_sma120=show_sma120,
         sma120=tuple(full_sma120[window.start_index : window.end_index + 1]),
         ma_color_scheme=ma_color_scheme,
+        overview_year_month_axis=overview_year_month_axis,
         horizontal_levels=levels,
     )
 
@@ -560,14 +597,29 @@ def _render_matplotlib(prepared: PreparedReviewChart, output_path: Path) -> None
     axis.set_ylabel("SIGNAL_ADJUSTED price")
     axis.grid(alpha=0.18)
     axis.legend(loc="upper left")
-    date_ticks = trading_session_date_ticks(prepared.window.bars)
-    axis.set_xticks([index for index, _ in date_ticks])
-    axis.set_xticklabels(
-        [_day_label(day) for _, day in date_ticks],
-        rotation=0,
-        ha="center",
-        fontsize=8,
-    )
+    if prepared.overview_year_month_axis:
+        overview_ticks = overview_year_month_ticks(prepared.window.bars)
+        axis.set_xticks([index for index, _, _ in overview_ticks])
+        axis.set_xticklabels(
+            [
+                f"{year_label}\n{month_label}"
+                for _, year_label, month_label in overview_ticks
+            ],
+            rotation=0,
+            ha="center",
+            fontsize=8,
+        )
+        for index in overview_year_separator_indexes(prepared.window.bars):
+            axis.axvline(index, color="#777777", linestyle=":", linewidth=0.8)
+    else:
+        date_ticks = trading_session_date_ticks(prepared.window.bars)
+        axis.set_xticks([index for index, _ in date_ticks])
+        axis.set_xticklabels(
+            [_day_label(day) for _, day in date_ticks],
+            rotation=0,
+            ha="center",
+            fontsize=8,
+        )
     figure.savefig(output_path, dpi=120)
     plt.close(figure)
 
@@ -594,12 +646,24 @@ def _chart_metadata(
         "show_sma5": prepared.show_sma5,
         "show_sma120": prepared.show_sma120,
         "ma_color_scheme": prepared.ma_color_scheme,
+        "overview_year_month_axis": prepared.overview_year_month_axis,
         "x_axis_date_policy": X_AXIS_DATE_POLICY,
         "x_axis_date_interval_sessions": X_AXIS_DATE_INTERVAL_SESSIONS,
         "x_axis_date_format": X_AXIS_DATE_FORMAT,
         "x_axis_tick_indexes": [index for index, _ in date_ticks],
         "x_axis_tick_dates": [day for _, day in date_ticks],
         "x_axis_tick_labels": [_day_label(day) for _, day in date_ticks],
+        "overview_year_month_ticks": [
+            {"index": index, "year": year, "month": month}
+            for index, year, month in overview_year_month_ticks(prepared.window.bars)
+        ]
+        if prepared.overview_year_month_axis
+        else [],
+        "overview_year_separator_indexes": list(
+            overview_year_separator_indexes(prepared.window.bars)
+        )
+        if prepared.overview_year_month_axis
+        else [],
         "horizontal_levels": {
             label: value for label, value in prepared.horizontal_levels
         },
@@ -937,11 +1001,22 @@ def _render_stdlib_png(prepared: PreparedReviewChart, output_path: Path) -> None
     canvas.text(
         left, 55, "SIGNAL ADJUSTED OHLC  SMA5  SMA10  SMA20  SMA60  SMA120", scale=1
     )
-    for index, day in trading_session_date_ticks(bars):
-        _draw_centered_multiline_text(
-            canvas,
-            x_of(index),
-            bottom + 10,
-            _day_label(day),
-        )
+    if prepared.overview_year_month_axis:
+        for index in overview_year_separator_indexes(bars):
+            canvas.line(x_of(index), top, x_of(index), bottom, (145, 145, 145))
+        for index, year_label, month_label in overview_year_month_ticks(bars):
+            _draw_centered_multiline_text(
+                canvas,
+                x_of(index),
+                bottom + 10,
+                f"{year_label} {month_label}".strip(),
+            )
+    else:
+        for index, day in trading_session_date_ticks(bars):
+            _draw_centered_multiline_text(
+                canvas,
+                x_of(index),
+                bottom + 10,
+                _day_label(day),
+            )
     canvas.write_png(output_path)

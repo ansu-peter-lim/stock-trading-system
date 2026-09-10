@@ -54,6 +54,17 @@ def test_below_runs_and_confirmation_boundaries() -> None:
     assert not confirmed_breakdown(d(98), d(100), d(98), d(100))
 
 
+def test_crossing_ratios_are_explicit_and_preserve_two_percent_default() -> None:
+    assert confirmed_breakout(d(101), d(100), d("100.99"), d(100), ratio=d("1.01"))
+    assert not confirmed_breakout(
+        d("100.999"), d(100), d("100.99"), d(100), ratio=d("1.01")
+    )
+    assert not confirmed_breakout(d("101.5"), d(100), d(101), d(100))
+    assert confirmed_breakdown(d(99), d(100), d("99.01"), d(100), ratio=d("0.99"))
+    assert not confirmed_breakdown(d("99.001"), d(100), d(99), d(100), ratio=d("0.99"))
+    assert not confirmed_breakdown(d("98.5"), d(100), d(99), d(100))
+
+
 def test_structural_inflection_uses_recent_equal_low_and_event_transition() -> None:
     values = (d(10), d(9), d(9), d(10), d(11))
     assert not structural_upward_inflection_state(values, 2, lookback=4)

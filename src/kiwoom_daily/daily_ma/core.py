@@ -44,13 +44,17 @@ def confirmed_breakout(
     ma: Decimal | None,
     previous_close: Decimal | None,
     previous_ma: Decimal | None,
+    *,
+    ratio: Decimal = Decimal("1.02"),
 ) -> bool:
+    if ratio <= 0:
+        raise ValueError("breakout ratio must be positive")
     return (
         ma is not None
         and previous_close is not None
         and previous_ma is not None
-        and close >= ma * Decimal("1.02")
-        and previous_close < previous_ma * Decimal("1.02")
+        and close >= ma * ratio
+        and previous_close < previous_ma * ratio
     )
 
 
@@ -59,13 +63,17 @@ def confirmed_breakdown(
     ma: Decimal | None,
     previous_close: Decimal | None,
     previous_ma: Decimal | None,
+    *,
+    ratio: Decimal = Decimal("0.98"),
 ) -> bool:
+    if ratio <= 0:
+        raise ValueError("breakdown ratio must be positive")
     return (
         ma is not None
         and previous_close is not None
         and previous_ma is not None
-        and close <= ma * Decimal("0.98")
-        and previous_close > previous_ma * Decimal("0.98")
+        and close <= ma * ratio
+        and previous_close > previous_ma * ratio
     )
 
 
